@@ -5,23 +5,21 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from typing_extensions import Literal
 
-from cg.apps.coverage import ChanjoAPI
 from cg.apps.crunchy import CrunchyAPI
 from cg.apps.demultiplex.demultiplex_api import DemultiplexingAPI
 from cg.apps.demultiplex.sample_sheet.api import IlluminaSampleSheetService
 from cg.apps.gens import GensAPI
-from cg.apps.gt import GenotypeAPI
 from cg.apps.hermes.hermes_api import HermesApi
 from cg.apps.housekeeper.hk import HousekeeperAPI
 from cg.apps.lims import LimsAPI
 from cg.apps.loqus import LoqusdbAPI
 from cg.apps.madeline.api import MadelineAPI
-from cg.apps.mutacc_auto import MutaccAutoAPI
 from cg.apps.scout.scoutapi import ScoutAPI
 from cg.apps.tb import TrailblazerAPI
 from cg.clients.arnold.api import ArnoldAPIClient
 from cg.clients.chanjo2.client import Chanjo2APIClient
 from cg.clients.janus.api import JanusAPIClient
+from cg.constants.constants import Workflow
 from cg.constants.observations import BalsamicObservationPanel, LoqusdbInstance
 from cg.constants.priority import SlurmQos
 from cg.meta.delivery.delivery import DeliveryAPI
@@ -81,8 +79,10 @@ class SlurmConfig(BaseModel):
     mail_user: EmailStr
     memory: int | None = None
     number_tasks: int | None = None
+    cpus_per_task: int | None = None
     conda_env: str | None = None
     qos: SlurmQos = SlurmQos.LOW
+    partition: str | None = None
 
 
 class Encryption(BaseModel):
@@ -131,18 +131,34 @@ class TrailblazerConfig(BaseModel):
 
 
 class StatinaConfig(BaseModel):
-    host: str | None = None
-    user: str
-    key: str
     api_url: str
-    upload_path: str
     auth_path: str
+    data_set: str
+    host: str | None = None
+    key: str
+    upload_path: str
+    user: str
 
 
 class CommonAppConfig(BaseModel):
     binary_path: str | None = None
     config_path: str | None = None
     container_mount_volume: str | None = None
+
+
+class ChanjoConfig(BaseModel):
+    binary_path: str
+    config_path: str
+
+
+class NatsConfig(BaseModel):
+    nats_binary_path: Path
+    server: str
+    stream: str
+    ca_cert_path: Path
+    client_cert_path: Path
+    client_key_path: Path
+    token_path: Path
 
 
 class HermesConfig(CommonAppConfig):
@@ -171,10 +187,15 @@ class LimsConfig(BaseModel):
 class CrunchyConfig(BaseModel):
     conda_binary: str | None = None
     cram_reference: str
+    tmp_dir_base: str
+    fallback_memory: int
+    fallback_minutes: int
     slurm: SlurmConfig
 
 
-class MutaccAutoConfig(CommonAppConfig):
+class MutaccAutoConfig(BaseModel):
+    binary_path: str
+    config_path: str
     padding: int = 300
 
 
@@ -193,9 +214,12 @@ class BalsamicConfig(CommonAppConfig):
     balsamic_cache: Path
     bed_path: Path
     binary_path: Path
+    cache_version: str
     cadd_path: Path
+    cancer_genelist: Path
     conda_binary: Path
     conda_env: str
+    cosmic_path: Path
     genome_interval_path: Path
     gens_coverage_female_path: Path
     gens_coverage_male_path: Path
@@ -212,6 +236,7 @@ class BalsamicConfig(CommonAppConfig):
     swegen_path: Path
     swegen_snv: Path
     swegen_sv: Path
+    workflow_profile: Path
 
 
 class MutantConfig(BaseModel):
@@ -225,6 +250,7 @@ class MipConfig(BaseModel):
     conda_binary: str | None = None
     conda_env: str
     mip_config: str
+    reference: str | None = None
     workflow: str
     root: str
     script: str
@@ -232,76 +258,107 @@ class MipConfig(BaseModel):
 
 class NalloConfig(CommonAppConfig):
     binary_path: str | None = None
-    compute_env: str
     conda_binary: str | None = None
     conda_env: str
-    platform: str
-    params: str
     config: str
-    resources: str
     launch_directory: str
-    workflow_bin_path: str
+    params: str
+    pipeline_deliverables: str
+    platform: str
     pre_run_script: str = ""
     profile: str
+    rank_model_threshold: int
+    rank_model_snv: str
+    rank_model_sv: str
+    reference: str
     repository: str
+    resources: str
     revision: str
     root: str
     slurm: SlurmConfig
     tower_workflow: str
+    variant_catalog: Path
+    workflow_bin_path: str
+
+
+class VerifybamidSvdFiles(BaseModel):
+    bed: Path
+    mu: Path
+    ud: Path
+
+
+class VerifybamidSvdFilesSet(BaseModel):
+    wes: VerifybamidSvdFiles
+    wgs: VerifybamidSvdFiles
+
+
+class GCNVCallerFiles(BaseModel):
+    gcnvcaller_model: Path
+    ploidy_model: Path
+    readcount_intervals: Path
 
 
 class RarediseaseConfig(CommonAppConfig):
     binary_path: str | None = None
-    compute_env: str
     conda_binary: str | None = None
     conda_env: str
-    platform: str
-    params: str
     config: str
-    resources: str
+    default_target_bed: str
+    gcnvcaller: dict[str, GCNVCallerFiles]
     launch_directory: str
-    workflow_bin_path: str
+    params: str
+    pipeline_deliverables: str
+    platform: str
     pre_run_script: str = ""
     profile: str
+    rank_model_threshold: int
+    rank_model_snv: str
+    rank_model_sv: str
+    reference: str
+    references_directory: Path
     repository: str
+    resources: str
     revision: str
     root: str
     slurm: SlurmConfig
     tower_workflow: str
+    variant_catalog: Path
+    verifybamid_svd: VerifybamidSvdFilesSet
+    workflow_bin_path: str
 
 
 class TomteConfig(CommonAppConfig):
     binary_path: str | None = None
-    compute_env: str
     conda_binary: str | None = None
     conda_env: str
-    platform: str
-    params: str
     config: str
-    resources: str
-    workflow_bin_path: str
+    params: str
+    pipeline_deliverables: str
+    platform: str
     pre_run_script: str = ""
     profile: str
     repository: str
+    resources: str
     revision: str
     root: str
     slurm: SlurmConfig
     tower_workflow: str
+    workflow_bin_path: str
 
 
 class RnafusionConfig(CommonAppConfig):
     binary_path: str
-    compute_env: str
     conda_binary: str | None = None
     conda_env: str
-    platform: str
-    params: str
     config: str
-    resources: str
     launch_directory: str
+    params: str
+    pipeline_deliverables: str
+    platform: str
     pre_run_script: str = ""
     profile: str
     repository: str
+    resources: str
     revision: str
     root: str
     slurm: SlurmConfig
@@ -313,15 +370,35 @@ class TaxprofilerConfig(CommonAppConfig):
     binary_path: str
     conda_binary: str | None = None
     conda_env: str
-    compute_env: str
-    platform: str
-    params: str
     config: str
-    resources: str
-    workflow_bin_path: str
+    params: str
+    pipeline_deliverables: str
+    platform: str
     pre_run_script: str = ""
     profile: str
     repository: str
+    resources: str
+    revision: str
+    root: str
+    slurm: SlurmConfig
+    tower_workflow: str
+    workflow_bin_path: str
+
+
+class TranaConfig(CommonAppConfig):
+    binary_path: str | None = None
+    compute_env: str
+    conda_binary: str | None = None
+    conda_env: str
+    config: str
+    launch_directory: str
+    params: str
+    pipeline_deliverables: str
+    platform: str
+    pre_run_script: str
+    profile: str
+    repository: str
+    resources: str
     revision: str
     root: str
     slurm: SlurmConfig
@@ -332,6 +409,7 @@ class MicrosaltConfig(BaseModel):
     binary_path: str
     conda_binary: str
     conda_env: str
+    config: str
     queries_path: str
     root: str
 
@@ -358,6 +436,11 @@ class EmailBaseSettings(BaseModel):
     smtp_server: str
 
 
+class FreshdeskConfig(BaseModel):
+    api_key: str
+    base_url: str
+
+
 class FOHMConfig(BaseModel):
     host: str
     port: int
@@ -372,6 +455,7 @@ class FOHMConfig(BaseModel):
 class ExternalConfig(BaseModel):
     hasta: str
     caesar: str
+    cluster: str
 
 
 class SeqeraPlatformConfig(BaseModel):
@@ -382,12 +466,13 @@ class SeqeraPlatformConfig(BaseModel):
 
 
 class DataFlowConfig(BaseModel):
+    archive_repository: str
     database_name: str
-    user: str
+    data_mover_housekeeper_mnt: Path
+    local_storage: str
     password: str
     url: str
-    local_storage: str
-    archive_repository: str
+    user: str
 
 
 class PacbioConfig(BaseModel):
@@ -405,6 +490,11 @@ class IlluminaConfig(BaseModel):
     demultiplexed_runs_dir: str
 
 
+class SlackWebhooks(BaseModel):
+    prod_team: str
+    sysdev_team: str
+
+
 class RunInstruments(BaseModel):
     pacbio: PacbioConfig
     nanopore: OxfordNanoporeConfig
@@ -419,6 +509,11 @@ class RunNamesServices(BaseModel):
 class PostProcessingServices(BaseModel):
     pacbio: PacBioPostProcessingService
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
+
+class GENSConfig(BaseModel):
+    binary_path: str
+    config_path: str
 
 
 class CGConfig(BaseModel):
@@ -443,8 +538,8 @@ class CGConfig(BaseModel):
     arnold: ArnoldConfig | None = None
     arnold_api_: ArnoldAPIClient | None = None
     illumina_backup_service: IlluminaBackupConfig | None = None
-    chanjo: CommonAppConfig = None
-    chanjo_api_: ChanjoAPI = None
+    chanjo: ChanjoConfig | None = None
+    chanjo_38: ChanjoConfig | None = None
     chanjo2: ClientConfig | None = None
     chanjo2_api_: Chanjo2APIClient | None = None
     crunchy: CrunchyConfig = None
@@ -457,10 +552,10 @@ class CGConfig(BaseModel):
     demultiplex: DemultiplexConfig = None
     demultiplex_api_: DemultiplexingAPI = None
     encryption: Encryption | None = None
+    nats: NatsConfig
     external: ExternalConfig = None
-    genotype: CommonAppConfig = None
-    genotype_api_: GenotypeAPI = None
-    gens: CommonAppConfig = None
+    freshdesk: FreshdeskConfig
+    gens: GENSConfig | None = None
     gens_api_: GensAPI = None
     hermes: HermesConfig = None
     hermes_api_: HermesApi = None
@@ -474,6 +569,8 @@ class CGConfig(BaseModel):
     loqusdb_somatic: CommonAppConfig = Field(None, alias=LoqusdbInstance.SOMATIC.value)
     loqusdb_tumor: CommonAppConfig = Field(None, alias=LoqusdbInstance.TUMOR.value)
     loqusdb_wes: CommonAppConfig = Field(None, alias=LoqusdbInstance.WES.value)
+    loqusdb_wes_38: CommonAppConfig = Field(None, alias=LoqusdbInstance.WES38.value)
+    loqusdb_wgs: CommonAppConfig = Field(None, alias=LoqusdbInstance.WGS38.value)
     loqusdb_somatic_lymphoid: CommonAppConfig = Field(
         None, alias=LoqusdbInstance.SOMATIC_LYMPHOID.value
     )
@@ -482,8 +579,8 @@ class CGConfig(BaseModel):
     )
     loqusdb_somatic_exome: CommonAppConfig = Field(None, alias=LoqusdbInstance.SOMATIC_EXOME.value)
     madeline_api_: MadelineAPI = None
-    mutacc_auto: MutaccAutoConfig = Field(None, alias="mutacc-auto")
-    mutacc_auto_api_: MutaccAutoAPI = None
+    mutacc_auto_hg19: MutaccAutoConfig
+    mutacc_auto_hg38: MutaccAutoConfig
     pdc: CommonAppConfig | None = None
     pdc_service_: PdcService | None = None
     post_processing_services_: PostProcessingServices | None = None
@@ -495,6 +592,7 @@ class CGConfig(BaseModel):
     scout_38: CommonAppConfig = None
     scout_api_37_: ScoutAPI = None
     scout_api_38_: ScoutAPI = None
+    slack_webhooks: SlackWebhooks
     tar: CommonAppConfig | None = None
     trailblazer: TrailblazerConfig = None
     trailblazer_api_: TrailblazerAPI = None
@@ -514,6 +612,8 @@ class CGConfig(BaseModel):
     statina: StatinaConfig | None = None
     taxprofiler: TaxprofilerConfig | None = None
     tomte: TomteConfig | None = None
+    trana_16s: TranaConfig | None = Field(None, alias="trana-16s")
+    trana_its: TranaConfig | None = Field(None, alias="trana-its")
 
     # These are meta APIs that gets instantiated in the code
     meta_apis: dict = {}
@@ -527,15 +627,6 @@ class CGConfig(BaseModel):
             LOG.debug("Instantiating arnold api")
             api = ArnoldAPIClient(config=self.dict())
             self.arnold_api_ = api
-        return api
-
-    @property
-    def chanjo_api(self) -> ChanjoAPI:
-        api = self.__dict__.get("chanjo_api_")
-        if api is None:
-            LOG.debug("Instantiating chanjo api")
-            api = ChanjoAPI(config=self.dict())
-            self.chanjo_api_ = api
         return api
 
     @property
@@ -569,21 +660,17 @@ class CGConfig(BaseModel):
         return demultiplex_api
 
     @property
-    def genotype_api(self) -> GenotypeAPI:
-        api = self.__dict__.get("genotype_api_")
-        if api is None:
-            LOG.debug("Instantiating genotype api")
-            api = GenotypeAPI(config=self.dict())
-            self.genotype_api_ = api
-        return api
-
-    @property
     def gens_api(self) -> GensAPI:
         """Returns Gens API after making sure it has been instantiated."""
         api = self.__dict__.get("gens_api_")
         if api is None:
             LOG.debug("Instantiating gens api")
-            api = GensAPI(config=self.dict())
+            api = GensAPI(
+                config=GENSConfig(
+                    binary_path=self.gens.binary_path,
+                    config_path=self.gens.config_path,
+                )
+            )
             self.gens_api_ = api
         return api
 
@@ -641,15 +728,6 @@ class CGConfig(BaseModel):
             LOG.debug("Instantiating madeline api")
             api = MadelineAPI(config=self.dict())
             self.madeline_api_ = api
-        return api
-
-    @property
-    def mutacc_auto_api(self) -> MutaccAutoAPI:
-        api = self.__dict__.get("mutacc_auto_api_")
-        if api is None:
-            LOG.debug("Instantiating mutacc_auto api")
-            api = MutaccAutoAPI(config=self.dict())
-            self.mutacc_auto_api_ = api
         return api
 
     @property
@@ -813,6 +891,7 @@ class CGConfig(BaseModel):
             rsync_config = RsyncDeliveryConfig(**self.data_delivery.dict())
             service = DeliveryRsyncService(
                 delivery_path=self.delivery_path,
+                nats_config=self.nats,
                 rsync_config=rsync_config,
                 status_db=self.status_db,
             )
@@ -834,3 +913,37 @@ class CGConfig(BaseModel):
             )
             self.delivery_service_factory_ = factory
         return factory
+
+    def get_pipeline_config(self, workflow: Workflow):
+        pipeline_config = None
+        match workflow:
+            case Workflow.BALSAMIC | Workflow.BALSAMIC_PON | Workflow.BALSAMIC_UMI:
+                pipeline_config = self.balsamic
+            case Workflow.FLUFFY:
+                pipeline_config = self.fluffy
+            case Workflow.MICROSALT:
+                pipeline_config = self.microsalt
+            case Workflow.MIP_DNA:
+                pipeline_config = self.mip_rd_dna
+            case Workflow.MIP_RNA:
+                pipeline_config = self.mip_rd_rna
+            case Workflow.MUTANT:
+                pipeline_config = self.mutant
+            case Workflow.NALLO:
+                pipeline_config = self.nallo
+            case Workflow.RAREDISEASE:
+                pipeline_config = self.raredisease
+            case Workflow.RNAFUSION:
+                pipeline_config = self.rnafusion
+            case Workflow.TAXPROFILER:
+                pipeline_config = self.taxprofiler
+            case Workflow.TOMTE:
+                pipeline_config = self.tomte
+            case Workflow.TRANA_16S:
+                pipeline_config = self.trana_16s
+            case Workflow.TRANA_ITS:
+                pipeline_config = self.trana_its
+        if pipeline_config:
+            return pipeline_config
+        else:
+            raise NotImplementedError(f"There is no pipeline config for {workflow}")

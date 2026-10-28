@@ -1,3 +1,4 @@
+from cg.apps.lims import LimsAPI
 from cg.constants.sequencing import SeqLibraryPrepCategory
 from cg.services.orders.validation.models.case import Case
 from cg.services.orders.validation.models.existing_case import ExistingCase
@@ -6,6 +7,11 @@ from cg.services.orders.validation.order_types.balsamic.models.case import Balsa
 from cg.services.orders.validation.order_types.balsamic.models.sample import BalsamicSample
 from cg.services.orders.validation.order_types.balsamic_umi.models.case import BalsamicUmiCase
 from cg.services.orders.validation.order_types.balsamic_umi.models.sample import BalsamicUmiSample
+from cg.services.orders.validation.order_types.mip_dna.models.case import MIPDNACase
+from cg.services.orders.validation.order_types.mip_dna.models.sample import MIPDNASample
+from cg.services.orders.validation.order_types.raredisease.models.case import RarediseaseCase
+from cg.services.orders.validation.order_types.raredisease.models.sample import RarediseaseSample
+from cg.services.orders.validation.order_types.tomte.models.case import TomteCase
 from cg.store.models import Application
 from cg.store.models import Case as DbCase
 from cg.store.models import Customer, Sample
@@ -87,3 +93,93 @@ def get_case_prep_categories(case: Case, store: Store) -> set[str]:
         if db_sample and db_sample.prep_category:
             prep_categories.add(db_sample.prep_category)
     return prep_categories
+
+
+def does_case_exist(case: MIPDNACase | RarediseaseCase | ExistingCase, store: Store):
+    if isinstance(case, ExistingCase):
+        return bool(store.get_case_by_internal_id(case.internal_id))
+    return True
+
+
+def is_single_sample_case(case: MIPDNACase | RarediseaseCase | ExistingCase, store: Store):
+    if isinstance(case, ExistingCase):
+        db_case: DbCase = store.get_case_by_internal_id_strict(case.internal_id)
+        contains_one_sample = bool(len(db_case.samples) == 1)
+    else:
+        contains_one_sample = bool(len(case.samples) == 1)
+    return contains_one_sample
+
+
+def is_sample_lineal_in_case(
+    sample: MIPDNASample | RarediseaseSample | ExistingSample,
+    case: MIPDNACase | RarediseaseCase,
+    store: Store,
+):
+    """Check that a sample either has a parent or is a parent to another sample in the case."""
+    if not (sample.mother or sample.father):
+        sample_name: str = get_sample_name(sample=sample, store=store)
+        if not any(
+            sample_name in [sample_in_case.mother, sample_in_case.father]
+            for sample_in_case in case.samples
+        ):
+            return False
+    return True
+
+
+def get_sample_name(sample: MIPDNASample | RarediseaseSample | ExistingSample, store: Store) -> str:
+    if isinstance(sample, ExistingSample):
+        sample_name: str = store.get_sample_by_internal_id_strict(sample.internal_id).name
+    else:
+        sample_name: str = sample.name
+    return sample_name
+
+
+def get_sample_sources(case: TomteCase | ExistingCase, lims_api: LimsAPI, store: Store) -> set:
+    if isinstance(case, ExistingCase):
+        return _get_existing_case_sources(case=case, lims_api=lims_api, store=store)
+    else:
+        return _get_new_case_sources(case=case, lims_api=lims_api, store=store)
+
+
+def _get_new_case_sources(case: TomteCase, lims_api: LimsAPI, store: Store) -> set:
+    sources = set()
+    for sample in case.samples:
+        if isinstance(sample, ExistingSample):
+            if db_sample := store.get_sample_by_internal_id(
+                sample.internal_id
+            ):  # If no sample is found, an error should be raised elsewhere
+                sources.add(
+                    lims_api.get_source(db_sample.from_sample or sample.internal_id)
+                )  # Downsampled samples are not in LIMS so we should get the source from the original sample
+        else:
+            sources.add(sample.source_comment if sample.source == "other" else sample.source)
+    return sources
+
+
+def _get_existing_case_sources(case: ExistingCase, lims_api: LimsAPI, store: Store) -> set:
+    db_case = store.get_case_by_internal_id(case.internal_id)
+    if not db_case:  # This should result in an error elsewhere
+        return set()
+    sources = set()
+    for sample in db_case.samples:
+        sources.add(lims_api.get_source(sample.from_sample or sample.internal_id))
+    return sources
+
+
+def get_invalid_panels(panels: list[str], store: Store) -> list[str]:
+    invalid_panels: list[str] = [
+        panel for panel in panels if not store.does_gene_panel_exist(panel)
+    ]
+    return invalid_panels
+
+
+def get_subject_ids(case: RarediseaseCase, store: Store) -> list[str]:
+    subject_ids: list[str] = []
+    for sample in case.samples:
+        if isinstance(sample, ExistingSample):
+            db_sample: Sample | None = store.get_sample_by_internal_id(sample.internal_id)
+            if db_sample and db_sample.subject_id:  # No sample found should raise error elsewhere
+                subject_ids.append(db_sample.subject_id)
+        elif sample.subject_id:
+            subject_ids.append(sample.subject_id)
+    return subject_ids

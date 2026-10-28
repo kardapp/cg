@@ -1,28 +1,21 @@
 import logging
-import re
 
-from housekeeper.store.models import File, Version
+from housekeeper.store.models import Version
 
 from cg.apps.lims import LimsAPI
 from cg.apps.madeline.api import MadelineAPI
-from cg.constants.constants import FileFormat
-from cg.constants.housekeeper_tags import HK_DELIVERY_REPORT_TAG, AnalysisTag, NFAnalysisTags
-from cg.constants.scout import (
-    RANK_MODEL_THRESHOLD,
-    RAREDISEASE_CASE_TAGS,
-    RAREDISEASE_SAMPLE_TAGS,
-    GenomeBuild,
-    UploadTrack,
-)
+from cg.constants.constants import GenomeBuild
+from cg.constants.housekeeper_tags import HK_DELIVERY_REPORT_TAG
+from cg.constants.scout import RAREDISEASE_CASE_TAGS, RAREDISEASE_SAMPLE_TAGS, UploadTrack
 from cg.constants.sequencing import Variants
-from cg.io.controller import ReadFile
 from cg.meta.upload.scout.hk_tags import CaseTags, SampleTags
+from cg.meta.upload.scout.rank_model import RankModel, parse_rank_model_file
 from cg.meta.upload.scout.scout_config_builder import ScoutConfigBuilder
 from cg.meta.workflow.raredisease import RarediseaseAnalysisAPI
 from cg.models.scout.scout_load_config import (
     CaseImages,
+    CustomImage,
     CustomImages,
-    Eklipse,
     RarediseaseLoadConfig,
     ScoutRarediseaseIndividual,
 )
@@ -69,67 +62,29 @@ class RarediseaseConfigBuilder(ScoutConfigBuilder):
         self.load_custom_image_sample(
             load_config=load_config, analysis=analysis, hk_version=hk_version
         )
-        load_config.human_genome_build = GenomeBuild.hg19
-        load_config.rank_score_threshold = RANK_MODEL_THRESHOLD
-        load_config.rank_model_version = self.get_rank_model_version(
-            variant_type=Variants.SNV, hk_version=hk_version
+        load_config.human_genome_build = GenomeBuild.hg38
+        load_config.rank_score_threshold = self.raredisease_analysis_api.rank_model_threshold
+        snv_rank_model: RankModel = self._get_rank_model(
+            hk_version=hk_version, variant_type=Variants.SNV
         )
-        load_config.sv_rank_model_version = self.get_rank_model_version(
-            variant_type=Variants.SV, hk_version=hk_version
+        load_config.rank_model_url = snv_rank_model.path
+        load_config.rank_model_version = snv_rank_model.version
+        sv_rank_model: RankModel = self._get_rank_model(
+            hk_version=hk_version, variant_type=Variants.SV
         )
+        load_config.sv_rank_model_url = sv_rank_model.path
+        load_config.sv_rank_model_version = sv_rank_model.version
         return load_config
 
-    def get_rank_model_version(self, variant_type: Variants, hk_version: Version) -> str:
-        """
-        Returns the rank model version for a variant type from the manifest file.
-        Raises:
-            FileNotFoundError if no manifest file is found in housekeeper.
-        """
-        hk_manifest_file: File = self.get_file_from_hk(
-            {NFAnalysisTags.MANIFEST}, hk_version=hk_version
-        )
-        if not hk_manifest_file:
-            raise FileNotFoundError("No manifest file found in Housekeeper.")
-        return self.extract_rank_model_from_manifest(
-            hk_manifest_file=hk_manifest_file, variant_type=variant_type
-        )
-
-    def extract_rank_model_from_manifest(
-        self, hk_manifest_file: File, variant_type: Variants
-    ) -> str:
-        content: dict[str, dict[str, str]] = ReadFile.get_content_from_file(
-            file_format=FileFormat.JSON, file_path=hk_manifest_file
-        )
-        return self.get_rank_model_version_from_manifest_content(
-            content=content, variant_type=variant_type
-        )
-
-    def get_rank_model_version_from_manifest_content(
-        self, content: dict[str, dict[str, str]], variant_type: Variants
-    ) -> str:
-        """
-        Return the rank model version from the manifest file content.
-        Raises:
-            ValueError if pattern not found ing process or clinical not found in script.
-        """
-        pattern: str = variant_type.upper() + ":GENMOD_SCORE"
-        for key, value in content["tasks"].items():
-            process: str = value.get("process")
-            script: str = value.get("script")
-            if pattern in process and AnalysisTag.CLINICAL in script:
-                return self._get_version_from_manifest_script(script)
-        raise ValueError(
-            f"Either {pattern} not found in any process or {AnalysisTag.CLINICAL} not found in any script of the manifest file"
-        )
-
-    def _get_version_from_manifest_script(self, script: str) -> str:
-        """
-        Returns the rank model version in the format 'vX.X from the given script string.
-        Raises a ValueError if no rank model version is found in the script string.
-        """
-        if match := re.search(r"v(\d+\.\d+)", script):
-            return match.group(1)
-        raise ValueError("No rank model version found")
+    def _get_rank_model(self, hk_version: Version, variant_type: Variants) -> RankModel:
+        if variant_type == Variants.SNV:
+            tags = {"rank-model-snv"}
+        else:
+            tags = {"rank-model-sv"}
+        file_path: str | None = self.get_file_from_hk(hk_tags=tags, hk_version=hk_version)
+        if not file_path:
+            raise FileNotFoundError(f"No {variant_type} rank model file found in Housekeeper.")
+        return parse_rank_model_file(file_path)
 
     def load_custom_image_sample(
         self, load_config: RarediseaseLoadConfig, analysis: Analysis, hk_version: Version
@@ -137,24 +92,24 @@ class RarediseaseConfigBuilder(ScoutConfigBuilder):
         """Build custom images config."""
         LOG.info("Adding custom images")
 
-        eklipse_images: list = []
+        saltshaker_images: list = []
         for sample in analysis.case.samples:
             sample_id: str = sample.internal_id
-            eklipse_image_path = self.get_file_from_hk(
-                hk_tags=set(self.sample_tags.eklipse_path).union({sample_id}),
+            saltshaker_image_path = self.get_file_from_hk(
+                hk_tags=set(self.sample_tags.saltshaker_path).union({sample_id}),
                 hk_version=hk_version,
             )
-            if eklipse_image_path:
-                eklipse_image = Eklipse(
+            if saltshaker_image_path:
+                saltshaker_image = CustomImage(
                     title=sample_id,
-                    path=eklipse_image_path,
-                    description="eKLIPse MT images",
-                    width="800",
+                    path=saltshaker_image_path,
+                    description="SAltShaker MT images",
+                    width="1000",
                     height="800",
                 )
-                eklipse_images.append(eklipse_image)
-        if eklipse_images:
-            case_images = CaseImages(eKLIPse=eklipse_images)
+                saltshaker_images.append(saltshaker_image)
+        if saltshaker_images:
+            case_images = CaseImages(saltshaker=saltshaker_images)
             config_custom_images = CustomImages(case_images=case_images)
             load_config.custom_images = config_custom_images
 
@@ -221,7 +176,10 @@ class RarediseaseConfigBuilder(ScoutConfigBuilder):
             sample_id=sample_id,
             hk_version=hk_version,
         )
-        config_sample.d4_file = self.get_sample_file(
-            hk_tags=self.sample_tags.d4_file, sample_id=sample_id, hk_version=hk_version
+        config_sample.tiddit_coverage_wig = self.get_sample_file(
+            hk_tags=self.sample_tags.tiddit_coverage_wig, hk_version=hk_version, sample_id=sample_id
         )
         self.include_reviewer_files(config_sample=config_sample, hk_version=hk_version)
+
+    def _get_reviewer_reference_file(self) -> str:
+        return self.raredisease_analysis_api.reference

@@ -1,0 +1,118 @@
+import logging
+from datetime import datetime
+from pathlib import Path
+
+from cg.apps.slurm.slurm_api import SlurmAPI
+from cg.constants.priority import SlurmQos
+from cg.models.cg_config import CGConfig, DataDeliveryConfig
+from cg.models.slurm.sbatch import Sbatch
+from cg.services.deliver_files.rsync.sbatch_commands import (
+    ERROR_TRANSFER_TO_CLUSTER_FUNCTION,
+    RSYNC_CONTENTS_COMMAND,
+    RSYNC_EXCLUDE_OPTION,
+    RSYNC_INCLUDE_OPTION,
+)
+from cg.services.events import event_publisher
+from cg.services.events.constants import (
+    EXTERNAL_SAMPLE_TRANSFER_COMPLETED_EVENT,
+    EXTERNAL_SAMPLE_TRANSFER_FAILED_EVENT,
+    SAMPLE_INTERNAL_ID_FIELD,
+)
+from cg.store.models import Sample
+
+LOG = logging.getLogger(__name__)
+RSYNC_SBATCH_SCRIPT: str = "transfer_sample.sh"
+
+
+def transfer_sample(cg_config: CGConfig, sample: Sample, number_of_attempts: int = 1):
+    """Submit an sbatch job that rsyncs one external sample to the destination cluster."""
+    LOG.info(
+        f"Preparing to transfer sample {sample.name} for customer {sample.customer.internal_id}"
+    )
+    slurm_api = SlurmAPI()
+    sbatch_script: Path = _get_sbatch_script_path(
+        sample=sample, rsync_path=cg_config.data_delivery.base_path
+    )
+    sbatch_command: str = _get_sbatch_command(cg_config=cg_config, sample=sample)
+    sbatch_parameters: Sbatch = _get_sbatch_parameters(
+        cg_config=cg_config,
+        command=sbatch_command,
+        data_delivery_config=cg_config.data_delivery,
+        number_of_attempts=number_of_attempts,
+        sample=sample,
+        sbatch_path=sbatch_script,
+    )
+    sbatch_content: str = slurm_api.generate_sbatch_content(sbatch_parameters)
+    slurm_api.submit_sbatch(sbatch_content=sbatch_content, sbatch_path=sbatch_script)
+
+
+def _get_sbatch_script_path(sample: Sample, rsync_path: str) -> Path:
+    timestamp: str = datetime.now().strftime("%y%m%d_%H_%M_%S_%f")
+    log_dir = Path(rsync_path, f"{sample.customer.internal_id}_{sample.name}_{timestamp}")
+    log_dir.mkdir(parents=True, exist_ok=False)
+    LOG.debug(f"Ensured existence of log directory for sample transfer: {log_dir}")
+    sbatch_script = Path(log_dir, RSYNC_SBATCH_SCRIPT)
+    return sbatch_script
+
+
+def _get_sbatch_command(cg_config: CGConfig, sample: Sample) -> str:
+    source_path = Path(cg_config.external.caesar % sample.customer.internal_id, sample.name)
+    LOG.debug(f"Source directory: {source_path}")
+    destination_path = Path(cg_config.external.cluster % sample.customer.internal_id, sample.name)
+    destination_path.mkdir(parents=True, exist_ok=True)
+    LOG.debug(f"Destination directory: {destination_path}")
+    event_payload = {
+        SAMPLE_INTERNAL_ID_FIELD: sample.internal_id,
+        "transfer_completed_at": "$(date +%Y-%m-%dT%H:%M:%S)",
+        "cluster_location": destination_path.as_posix(),
+    }
+    command: str = (
+        RSYNC_CONTENTS_COMMAND.format(
+            source_path=source_path,
+            destination_path=destination_path,
+        ).rstrip("\n")
+        + RSYNC_INCLUDE_OPTION.format(include_pattern="*.bam").strip("\n")
+        + RSYNC_INCLUDE_OPTION.format(include_pattern="*.fastq.gz").strip("\n")
+        + RSYNC_EXCLUDE_OPTION.format(exclude_pattern="*").lstrip("\n")
+        + "\n"
+        + event_publisher.get_publish_command(
+            nats_config=cg_config.nats,
+            event_name=EXTERNAL_SAMPLE_TRANSFER_COMPLETED_EVENT,
+            data=event_payload,
+        )
+    )
+    return command
+
+
+def _get_sbatch_parameters(
+    cg_config: CGConfig,
+    command: str,
+    data_delivery_config: DataDeliveryConfig,
+    number_of_attempts: int,
+    sample: Sample,
+    sbatch_path: Path,
+) -> Sbatch:
+    log_dir: str = sbatch_path.parent.as_posix()
+    failure_event = event_publisher.get_publish_command(
+        nats_config=cg_config.nats,
+        event_name=EXTERNAL_SAMPLE_TRANSFER_FAILED_EVENT,
+        data={
+            SAMPLE_INTERNAL_ID_FIELD: sample.internal_id,
+            "transfer_failed_at": "$(date +%Y-%m-%dT%H:%M:%S)",
+            "log_dir": log_dir,
+            "number_of_attempts": number_of_attempts,
+        },
+    )
+    sbatch_parameters = Sbatch(
+        job_name=f"{sample.customer.internal_id}_{sample.name}_rsync_external_data",
+        account=data_delivery_config.account,
+        number_tasks=1,
+        memory=1,
+        log_dir=log_dir,
+        email=data_delivery_config.mail_user,
+        hours=24,
+        commands=command,
+        error=ERROR_TRANSFER_TO_CLUSTER_FUNCTION.format(failure_event=failure_event),
+        quality_of_service=SlurmQos.NORMAL,
+    )
+    return sbatch_parameters

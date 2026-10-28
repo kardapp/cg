@@ -25,10 +25,10 @@ def test_run_raises_error_if_not_configured(
 
     # GIVEN that the case has a workflow and no ongoing analysis
     mocker.patch.object(Tracker, "ensure_analysis_not_ongoing", return_value=None)
-    mock_case = create_autospec(Case)
-    sample = create_autospec(Sample)
-    mock_case.samples = [sample]
+    sample: Sample = create_autospec(Sample)
+    mock_case: Case = create_autospec(Case, data_analysis=Workflow.MICROSALT, samples=[sample])
     mocker.patch.object(Store, "get_case_by_internal_id", return_value=mock_case)
+    mocker.patch.object(Store, "get_case_by_internal_id_strict", return_value=mock_case)
 
     # GIVEN that the config file does not exist
 
@@ -51,6 +51,7 @@ def test_run_tracks_case(cli_runner: CliRunner, cg_context: CGConfig, mocker: Mo
     mock_case.data_analysis = Workflow.MICROSALT
     mock_case.samples = [create_autospec(Sample), create_autospec(Sample)]
     mocker.patch.object(Store, "get_case_by_internal_id", return_value=mock_case)
+    mocker.patch.object(Store, "get_case_by_internal_id_strict", return_value=mock_case)
     mocker.patch.object(Tracker, "ensure_analysis_not_ongoing", return_value=None)
     mocker.patch.object(Path, "exists", return_value=True)
     microsalt_config = cg_context.microsalt
@@ -63,6 +64,7 @@ def test_run_tracks_case(cli_runner: CliRunner, cg_context: CGConfig, mocker: Mo
         config_file=expected_config_file.as_posix(),
         environment=microsalt_config.conda_env,
         fastq_directory=expected_fastq_dir.as_posix(),
+        pipeline_config_path=microsalt_config.config,
     )
     mocker.patch.object(SubprocessSubmitter, "submit", return_value=expected_case_config)
     track_mock = mocker.patch.object(Tracker, "track")

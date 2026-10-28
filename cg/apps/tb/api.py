@@ -4,8 +4,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+import requests
 from google.auth.transport.requests import Request
 from google.oauth2.service_account import IDTokenCredentials
+from requests import Response
 
 from cg.apps.tb.dto.create_job_request import CreateJobRequest
 from cg.apps.tb.dto.summary_response import AnalysisSummary, SummariesResponse
@@ -14,7 +16,13 @@ from cg.constants import Workflow
 from cg.constants.constants import APIMethods, FileFormat, JobType, WorkflowManager
 from cg.constants.priority import TrailblazerPriority
 from cg.constants.tb import AnalysisStatus
-from cg.exc import AnalysisNotCompletedError, TrailblazerAnalysisNotFound, TrailblazerAPIHTTPError
+from cg.exc import (
+    AnalysisNotCompletedError,
+    TrailblazerAnalysisDeliveryError,
+    TrailblazerAnalysisNotFound,
+    TrailblazerAPIHTTPError,
+    TrailblazerFailedToGetAnalysesError,
+)
 from cg.io.controller import APIRequest, ReadStream
 
 LOG = logging.getLogger(__name__)
@@ -81,6 +89,12 @@ class TrailblazerAPI:
 
         return {"Authorization": f"Bearer {self._credentials.token}"}
 
+    def _get_auth_headers(self, auth_token: str | None) -> dict[str, str]:
+        if auth_token:
+            return self.auth_header | {"X-On-Behalf-Of": auth_token}
+        else:
+            return self.auth_header
+
     def query_trailblazer(
         self, command: str, request_body: dict, method: str = APIMethods.POST
     ) -> Any:
@@ -134,7 +148,7 @@ class TrailblazerAPI:
         self,
         case_id: str,
         analysis_type: str,
-        config_path: str,
+        config_path: str | None,
         out_dir: str,
         priority: TrailblazerPriority,
         workflow: Workflow,
@@ -209,18 +223,71 @@ class TrailblazerAPI:
         response_data = SummariesResponse.model_validate(response)
         return response_data.summaries
 
-    def get_analyses_to_deliver(self, order_id: int) -> list[TrailblazerAnalysis]:
-        """Return the analyses in the order ready to be delivered."""
-        endpoint = (
-            f"analyses?orderId={order_id}&status[]={AnalysisStatus.COMPLETED}&delivered=false"
+    def set_analyses_delivery_status(
+        self,
+        trailblazer_ids: list[int],
+        is_delivered: bool,
+        signature: str | None,
+        auth_token: str | None = None,
+    ) -> Response:
+        """Sets the given analyses to delivered/undelivered."""
+        analysis_dicts = []
+        for trailblazer_id in trailblazer_ids:
+            analysis_dict = {"id": trailblazer_id, "is_delivered": is_delivered}
+            analysis_dicts.append(analysis_dict)
+        LOG.info(f"Setting analyses {trailblazer_ids} as delivered in Trailblazer")
+        response: Response = requests.patch(
+            json={"analyses": analysis_dicts, "signature": signature},
+            headers=self._get_auth_headers(auth_token=auth_token),
+            url=f"{self.host}/analyses",
         )
+        if not response.ok:
+            raise TrailblazerAnalysisDeliveryError(response.reason)
+        return response
+
+    def get_analyses_to_deliver_for_order(self, order_id: int) -> list[TrailblazerAnalysis]:
+        """Return the analyses in the order ready to be delivered."""
+        endpoint = f"analyses?orderId={order_id}&status[]={AnalysisStatus.COMPLETED}&delivered=false&holdDelivery=false"
         raw_response = self.query_trailblazer(
             command=endpoint, request_body={}, method=APIMethods.GET
         )
         validated_response = AnalysesResponse.model_validate(raw_response)
         return validated_response.analyses
 
+    def get_delivered_analyses_for_order(self, order_id: int) -> list[TrailblazerAnalysis]:
+        url = f"{self.host}/analyses?orderId={order_id}&status[]=completed&delivered=true"
+        response = requests.get(url=url, headers=self.auth_header)
+        if not response.ok:
+            raise TrailblazerFailedToGetAnalysesError(response.reason)
+        validated_response = AnalysesResponse.model_validate(response.json())
+        return validated_response.analyses
+
     def verify_latest_analysis_is_completed(self, case_id: str, force: bool = False) -> None:
         """Raises an AnalysisNotCompletedError if the latest analysis for the case has not completed."""
         if not self.is_latest_analysis_completed(case_id) and not force:
             raise AnalysisNotCompletedError(f"The latest analysis for {case_id} has not completed.")
+
+    def get_analyses_to_deliver_for_case(self, case_id: str) -> list[TrailblazerAnalysis]:
+        endpoint = f"analyses?case_id={case_id}&status[]={AnalysisStatus.COMPLETED}&delivered=false&holdDelivery=false"
+        raw_response = self.query_trailblazer(
+            command=endpoint, request_body={}, method=APIMethods.GET
+        )
+        validated_response = AnalysesResponse.model_validate(raw_response)
+        return validated_response.analyses
+
+    def get_all_analyses_to_deliver(
+        self, exclude_workflows: list[Workflow] | None = None
+    ) -> list[TrailblazerAnalysis]:
+        exclude_workflows_query: str = self._generate_exclude_workflow_query(exclude_workflows)
+        endpoint = f"analyses?status[]={AnalysisStatus.COMPLETED}&delivered=false&holdDelivery=false{exclude_workflows_query}"
+        raw_response = self.query_trailblazer(
+            command=endpoint, request_body={}, method=APIMethods.GET
+        )
+        validated_response = AnalysesResponse.model_validate(raw_response)
+        return validated_response.analyses
+
+    @staticmethod
+    def _generate_exclude_workflow_query(workflows: list[Workflow] | None) -> str:
+        if not workflows:
+            return ""
+        return "".join(f"&excludeWorkflow[]={workflow.upper()}" for workflow in workflows)

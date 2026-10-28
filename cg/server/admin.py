@@ -6,17 +6,18 @@ from flask import flash, redirect, request, session, url_for
 from flask_admin.actions import action
 from flask_admin.contrib.sqla import ModelView
 from flask_dance.contrib.google import google
-from markupsafe import Markup
+from markupsafe import Markup, escape
 from sqlalchemy import inspect
 from wtforms.form import Form
 
 from cg.constants.constants import NG_UL_SUFFIX, CaseActions, DataDelivery, Workflow
 from cg.models.orders.constants import OrderType
+from cg.server.app_config import app_config
 from cg.server.ext import applications_service, db, sample_service
 from cg.server.utils import MultiCheckboxField
 from cg.store.models import Application
 from cg.utils.flask.enum import SelectEnumField
-from cg.server.app_config import app_config
+from cg.utils.number_formatter import Si
 
 
 class BaseView(ModelView):
@@ -29,6 +30,26 @@ class BaseView(ModelView):
     def inaccessible_callback(self, name, **kwargs):
         # redirect to login page if user doesn't have access
         return redirect(url_for("google.login", next=request.url))
+
+
+def view_hifi_yield_si_unit_formatted(unused1, unused2, model, unused3):
+    del unused1, unused2, unused3
+
+    if model.hifi_yield is None:
+        return None
+
+    formatted_number = Si.prefix(value=model.hifi_yield, unit="b")
+    return Markup(formatted_number)
+
+
+def view_reads_large_number_formatted(unused1, unused2, model, unused3):
+    del unused1, unused2, unused3
+
+    if model.reads is None:
+        return None
+
+    formatted_number = Si.group_digits(model.reads)
+    return Markup(formatted_number)
 
 
 def view_priority(unused1, unused2, model, unused3):
@@ -112,18 +133,16 @@ def view_pacbio_sample_sequencing_metrics_link(unused1, unused2, model, unused3)
     )
 
 
-def is_external_application(unused1, unused2, model, unused3):
-    """column formatter to open this view"""
-    del unused1, unused2, unused3
-    return model.application_version.application.is_external if model.application_version else ""
-
-
-def view_order_types(unused1, unused2, model, unused3):
-    del unused1, unused2, unused3
-    order_type_list = "<br>".join(model.order_types)
+def view_cap_text_column_width(unused1, unused2, model, attribute_name):
+    """Column formatter to cap long text columns to a readable width."""
+    del unused1, unused2
+    text = getattr(model, attribute_name)
     return (
-        Markup(f'<div style="display: inline-block; min-width: 200px;">{order_type_list}</div>')
-        if model.order_type_applications
+        Markup(
+            "<div style='max-width: 400px; white-space: normal; overflow-wrap: break-word;'>"
+            f"{escape(text)}</div>"
+        )
+        if text
         else ""
     )
 
@@ -207,12 +226,18 @@ def view_ticket_link(unused1, unused2, model, attribute_name):
     ticket_str = str(ticket_attr).strip()
 
     # Freshdesk ticket IDs have >=7 digits
-    if len(ticket_str) >= 7:
-        ticket_link = f"{app_config.freshdesk_url}/a/tickets/{ticket_str}"
-        ticket_markup = Markup(f"<a href='{ticket_link}'>{ticket_str}</a>")
-        return ticket_markup
-    else:
-        return ticket_str
+    return _get_ticket_markups(ticket_str)
+
+
+def view_ticket_link_via_order(_view, _context, model, attribute):
+    """
+    Column formatter used to add hyperlink to the ticketing system, where the model has a
+    relationship to the Order table.
+    """
+    order_attr, ticket_attr = attribute.split(".")
+    order = getattr(model, order_attr)
+    ticket_str = str(getattr(order, ticket_attr))
+    return _get_ticket_markups(ticket_str)
 
 
 def view_tickets_links(unused1, unused2, model, unused3):
@@ -226,28 +251,38 @@ def view_tickets_links(unused1, unused2, model, unused3):
         ticket_str = str(ticket).strip()
 
         # Freshdesk ticket IDs have >=7 digits
-        if len(ticket_str) >= 7:
-            ticket_link = f"{app_config.freshdesk_url}/a/tickets/{ticket_str}"
-            ticket_markup = Markup(f"<a href='{ticket_link}'>{ticket_str}</a>")
-            tickets_markups.append(ticket_markup)
-        else:
-            tickets_markups.append(ticket_str)
+        tickets_markups.append(_get_ticket_markups(ticket_str))
 
     return Markup(", ".join(tickets_markups))
+
+
+def _get_ticket_markups(ticket_str: str) -> str:
+    # Freshdesk tickets are 7 digits
+    if len(ticket_str) >= 7:
+        ticket_link = f"{app_config.freshdesk_url}/a/tickets/{ticket_str}"
+        ticket_markup = Markup(f"<a href='{ticket_link}'>{ticket_str}</a>")
+        return ticket_markup
+    else:
+        return ticket_str
 
 
 class ApplicationView(BaseView):
     """Admin view for Model.Application"""
 
-    column_list = list(inspect(Application).columns) + ["order_types"]
+    page_size = 100
+
+    column_list = [column.name for column in inspect(Application).columns] + ["order_types"]
 
     column_editable_list = [
         "description",
         "is_accredited",
         "target_reads",
         "percent_reads_guaranteed",
+        "target_hifi_yield",
+        "percent_hifi_yield_guaranteed",
         "comment",
         "prep_category",
+        "read_type",
         "sequencing_depth",
         "min_sequencing_depth",
         "is_external",
@@ -259,27 +294,31 @@ class ApplicationView(BaseView):
         "sample_concentration_maximum_cfdna",
         "priority_processing",
         "is_archived",
+        "lims_workflow_id",
     ]
     column_exclude_list = [
-        "minimum_order",
-        "sample_amount",
-        "sample_volume",
-        "details",
-        "limitations",
-        "created_at",
-        "updated_at",
         "category",
+        "created_at",
+        "minimum_order",
+        "percent_kth",
+        "sample_amount",
+        "sample_concentration",
+        "sample_concentration_maximum",
+        "sample_concentration_maximum_cfdna",
+        "sample_concentration_minimum",
+        "sample_concentration_minimum_cfdna",
+        "sample_volume",
+        "updated_at",
     ]
     column_formatters = {
         "tag": view_application_version_link,
-        "order_types": view_order_types,
         "sample_concentration_minimum": view_sample_concentration_minimum,
         "sample_concentration_maximum": view_sample_concentration_maximum,
         "sample_concentration_minimum_cfdna": view_sample_concentration_minimum_cfdna,
         "sample_concentration_maximum_cfdna": view_sample_concentration_maximum_cfdna,
     }
-    column_filters = ["prep_category", "is_accredited", "is_archived"]
-    column_searchable_list = ["tag", "prep_category"]
+    column_filters = ["prep_category", "is_accredited", "is_archived", "read_type", "is_external"]
+    column_searchable_list = ["tag", "prep_category", "description", "details"]
     form_excluded_columns = ["category", "versions", "order_type_applications"]
     form_extra_fields = {
         "suitable_order_types": MultiCheckboxField(
@@ -306,10 +345,11 @@ class ApplicationView(BaseView):
     def on_model_change(self, form: Form, model: Application, is_created: bool):
         """Override to persist entries to the OrderTypeApplication table."""
         super(ApplicationView, self).on_model_change(form=form, model=model, is_created=is_created)
-        order_types: list[OrderType] = form["suitable_order_types"].data
-        applications_service.update_application_order_types(
-            application=model, order_types=order_types
-        )
+        if "suitable_order_types" in form.data:
+            order_types: list[OrderType] = form["suitable_order_types"].data
+            applications_service.update_application_order_types(
+                application=model, order_types=order_types
+            )
 
     def edit_form(self, obj=None):
         """Override to prefill the order types according to the current Application entry."""
@@ -364,7 +404,10 @@ class ApplicationLimitationsView(BaseView):
         "created_at",
         "updated_at",
     )
-    column_formatters = {"application": ApplicationView.view_application_link}
+    column_formatters = {
+        "application": ApplicationView.view_application_link,
+        "limitations": view_cap_text_column_width,
+    }
     column_filters = ["application.tag", "workflow"]
     column_searchable_list = ["application.tag"]
     column_editable_list = ["comment"]
@@ -417,6 +460,7 @@ class CustomerView(BaseView):
     column_editable_list = [
         "collaborations",
         "comment",
+        "label",
         "loqus_upload",
         "priority",
         "return_samples",
@@ -425,24 +469,25 @@ class CustomerView(BaseView):
     column_list = [
         "internal_id",
         "name",
-        "data_archive_location",
-        "comment",
+        "label",
         "primary_contact",
         "delivery_contact",
         "lab_contact",
         "priority",
-        "project_account_KI",
-        "project_account_kth",
+        "agreement_registration",
+        "invoice_reference",
         "return_samples",
         "scout_access",
+        "data_archive_location",
+        "comment",
     ]
-    column_filters = ["priority", "scout_access", "data_archive_location"]
+    column_filters = ["priority", "scout_access", "data_archive_location", "label"]
     column_formatters = {
         "delivery_contact": view_user_link,
         "lab_contact": view_user_link,
         "primary_contact": view_user_link,
     }
-    column_searchable_list = ["internal_id", "name"]
+    column_searchable_list = ["internal_id", "label", "name", "primary_contact.name"]
     form_excluded_columns = ["families", "samples", "pools", "orders", "invoices"]
 
 
@@ -461,6 +506,20 @@ class CaseView(BaseView):
 
     column_default_sort = ("created_at", True)
     column_editable_list = ["action", "comment"]
+    column_list = [
+        "internal_id",
+        "name",
+        "customer",
+        "tickets",
+        "action",
+        "priority",
+        "ordered_at",
+        "aggregated_sequencing_qc",
+        "data_analysis",
+        "data_delivery",
+        "_panels",
+        "comment",
+    ]
     column_exclude_list = ["created_at", "_cohorts", "synopsis"]
     column_filters = [
         "customer.internal_id",
@@ -613,6 +672,7 @@ class AnalysisView(BaseView):
 class IlluminaFlowCellView(BaseView):
     """Admin view for Model.IlluminaSequencingRun"""
 
+    can_export = True
     column_list = (
         "internal_id",
         "model",
@@ -699,10 +759,19 @@ class OrderView(BaseView):
     create_modal = True
     edit_modal = True
     form_ajax_refs = {
+        "analyses": {
+            "fields": ["case_internal_id"],
+            "page_size": 20,
+        },
         "cases": {
             "fields": ["internal_id", "name"],
             "page_size": 20,
-        }
+        },
+        "customer": {
+            "fields": ["internal_id"],
+            "page_size": 20,
+        },
+        "pools": {"fields": ["name"], "page_size": 20},
     }
 
 
@@ -721,23 +790,78 @@ class PoolView(BaseView):
     """Admin view for Model.Pool"""
 
     column_default_sort = ("created_at", True)
-    column_editable_list = ["ticket"]
     column_filters = ["customer.internal_id", "application_version.application"]
     column_formatters = {
         "application_version": view_application_link_via_application_version,
         "customer": view_customer_link,
         "invoice": InvoiceView.view_invoice_link,
+        "order.ticket_id": view_ticket_link_via_order,
     }
-    column_searchable_list = ["name", "order", "ticket", "customer.internal_id"]
+    column_list = [
+        "application_version",
+        "customer",
+        "invoice",
+        "comment",
+        "created_at",
+        "delivered_at",
+        "name",
+        "no_invoice",
+        "order.name",
+        "ordered_at",
+        "received_at",
+        "order.ticket_id",
+    ]
+    column_labels = {"order.ticket_id": "Ticket", "order.name": "Order"}
+    column_searchable_list = ["name", "order.name", "order.ticket_id", "customer.internal_id"]
+
+    form_ajax_refs = {
+        "customer": {
+            "fields": ["internal_id"],
+            "page_size": 20,
+        },
+        "invoice": {"fields": ["invoiced_at"], "page_size": 20},
+        "order": {"fields": ["id", "ticket_id"], "page_size": 20},
+        "samples": {
+            "fields": ["name", "internal_id"],
+            "page_size": 20,
+        },
+    }
 
 
 class SampleView(BaseView):
-    """Admin view for Model.Sample"""
+    """Admin view for Model.Sample."""
 
-    column_exclude_list = [
-        "age_at_sampling",
-        "_phenotype_groups",
-        "_phenotype_terms",
+    column_list = [
+        "internal_id",
+        "name",
+        "sex",
+        "subject_id",
+        "customer",
+        "original_ticket",
+        "comment",
+        "is_cancelled",
+        "priority",
+        "application_version",
+        "capture_kit",
+        "is_tumour",
+        "reads",
+        "hifi_yield",
+        "control",
+        "organism",
+        "reference_genome",
+        "invoice",
+        "no_invoice",
+        "order",
+        "lims_status",
+        "from_sample",
+        "downsampled_to",
+        "loqusdb_id",
+        "ordered_at",
+        "received_at",
+        "prepared_at",
+        "last_sequenced_at",
+        "delivered_at",
+        "skip_compression",
     ]
     column_default_sort = ("created_at", True)
     column_editable_list = [
@@ -745,19 +869,24 @@ class SampleView(BaseView):
         "downsampled_to",
         "is_tumour",
         "last_sequenced_at",
+        "lims_status",
         "sex",
+        "skip_compression",
     ]
     column_filters = [
-        "customer.internal_id",
-        "priority",
-        "sex",
         "application_version.application",
         "capture_kit",
+        "customer.internal_id",
+        "lims_status",
+        "priority",
+        "sex",
+        "skip_compression",
     ]
     column_formatters = {
         "application_version": view_application_link_via_application_version,
         "customer": view_customer_link,
-        "is_external": is_external_application,
+        "reads": view_reads_large_number_formatted,
+        "hifi_yield": view_hifi_yield_si_unit_formatted,
         "internal_id": view_case_sample_link,
         "invoice": InvoiceView.view_invoice_link,
         "original_ticket": view_ticket_link,
@@ -782,6 +911,15 @@ class SampleView(BaseView):
         "mother_links",
         "sequencing_metrics",
     ]
+    form_ajax_refs = {
+        "application_version": {"fields": ["application_tag"], "page_size": 20},
+        "customer": {
+            "fields": ["internal_id"],
+            "page_size": 20,
+        },
+        "organism": {"fields": ["internal_id", "name"], "page_size": 20},
+        "pool": {"fields": ["name"], "page_size": 20},
+    }
 
     @staticmethod
     def view_sample_link(unused1, unused2, model, unused3):
@@ -816,14 +954,24 @@ class SampleView(BaseView):
 class CaseSampleView(BaseView):
     """Admin view for Model.caseSample"""
 
+    can_export = True
     column_default_sort = ("created_at", True)
-    column_editable_list = ["status"]
-    column_filters = ["status"]
+    column_editable_list = ["should_deliver_sample", "status"]
+    column_filters = ["should_deliver_sample", "status"]
     column_formatters = {
         "case": CaseView.view_case_link,
         "sample": SampleView.view_sample_link,
     }
-    column_searchable_list = ["case.internal_id", "case.name", "sample.internal_id"]
+    column_searchable_list = [
+        "case.internal_id",
+        "case.name",
+        "sample.internal_id",
+        "sample.name",
+        "father.internal_id",
+        "father.name",
+        "mother.internal_id",
+        "mother.name",
+    ]
     create_modal = True
     edit_modal = True
     form_ajax_refs = {
@@ -854,12 +1002,14 @@ class UserView(BaseView):
     column_filters = ["is_admin", "order_portal_login", "customers"]
     column_hide_backrefs = False
     column_list = ("name", "email", "is_admin", "order_portal_login", "customers")
-    column_searchable_list = ["name", "email"]
+    column_searchable_list = ["name", "email", "customers.name", "customers.internal_id"]
     create_modal = True
     edit_modal = True
 
 
 class IlluminaSampleSequencingMetricsView(BaseView):
+
+    can_export = True
     column_list = [
         "flow_cell",
         "sample",
@@ -878,12 +1028,14 @@ class IlluminaSampleSequencingMetricsView(BaseView):
     column_searchable_list = ["sample.internal_id", "instrument_run.device.internal_id"]
 
 
-class PacbioSmrtCellView(BaseView):
+class PacbioSmrtCellMetricsView(BaseView):
     """Admin view for Model.PacbioSMRTCell"""
 
+    can_export = True
     column_list = (
         "internal_id",
-        "run_name",
+        "sequencing_run.run_name",
+        "sequencing_run.run_id",
         "movie_name",
         "well",
         "plate",
@@ -907,13 +1059,31 @@ class PacbioSmrtCellView(BaseView):
         "internal_id": view_pacbio_sample_sequencing_metrics_link,
         "model": view_smrt_cell_model,
     }
+    column_labels = {"sequencing_run.run_name": "Run Name", "sequencing_run.run_id": "Run ID"}
     column_default_sort = ("completed_at", True)
-    column_searchable_list = ["device.internal_id", "run_name", "movie_name"]
+    column_searchable_list = [
+        "device.internal_id",
+        "movie_name",
+        "sequencing_run.run_id",
+        "sequencing_run.run_name",
+    ]
     column_sortable_list = [
         ("internal_id", "device.internal_id"),
         "started_at",
         "completed_at",
     ]
+
+    def delete_model(self, model):
+        try:
+            # Pacbio SMRT cells are only run once, so cascading to the run_device table is okay.
+            self.session.delete(model.device)
+            self.session.commit()
+            return True
+        except Exception as ex:
+            if not self.handle_view_exception(ex):
+                raise
+            self.session.rollback()
+            return False
 
     @staticmethod
     def view_smrt_cell_link(unused1, unused2, model, unused3):
@@ -924,7 +1094,7 @@ class PacbioSmrtCellView(BaseView):
                 "<a href='%s'>%s</a>"
                 % (
                     url_for(
-                        "pacbiosequencingrun.index_view",
+                        "pacbiosmrtcellmetrics.index_view",
                         search=model.instrument_run.device.internal_id,
                     ),
                     model.instrument_run.device.internal_id,
@@ -936,19 +1106,24 @@ class PacbioSmrtCellView(BaseView):
 
 
 class PacbioSampleRunMetricsView(BaseView):
-    column_filters = ["instrument_run.run_name", "instrument_run.plate"]
+
+    can_export = True
+    column_filters = [
+        "instrument_run.plate",
+        "instrument_run.sequencing_run.run_id",
+    ]
     column_formatters = {
-        "smrt_cell": PacbioSmrtCellView.view_smrt_cell_link,
+        "smrt_cell": PacbioSmrtCellMetricsView.view_smrt_cell_link,
         "sample": SampleView.view_sample_link,
     }
     column_labels = {
-        "instrument_run.run_name": "Run name",
         "instrument_run.plate": "Plate",
+        "instrument_run.sequencing_run.run_id": "Run ID",
     }
     column_list = [
         "smrt_cell",
         "sample",
-        "instrument_run.run_name",
+        "instrument_run.sequencing_run.run_id",
         "instrument_run.plate",
         "hifi_reads",
         "hifi_yield",
@@ -958,4 +1133,5 @@ class PacbioSampleRunMetricsView(BaseView):
     column_searchable_list = [
         "sample.internal_id",
         "instrument_run.device.internal_id",
+        "instrument_run.sequencing_run.run_id",
     ]

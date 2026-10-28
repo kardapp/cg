@@ -1,58 +1,225 @@
-"""Module for Raredisease analysis API tests."""
+from pathlib import Path
+from typing import Any
+from unittest.mock import Mock, create_autospec
 
-import os
+import pytest
+from pytest_mock import MockerFixture
 
+from cg.apps.coverage import ChanjoAPI
+from cg.apps.scout.scoutapi import ScoutAPI
+from cg.clients.chanjo2.models import CoverageMetricsChanjo1
+from cg.constants import SexOptions, Workflow
+from cg.constants.constants import GenomeBuild, GenomeVersion
+from cg.constants.sequencing import SeqLibraryPrepCategory
+from cg.meta.workflow import raredisease as raredisease_analysis_api
 from cg.meta.workflow.raredisease import RarediseaseAnalysisAPI
-from cg.models.cg_config import CGConfig
+from cg.models.analysis import NextflowAnalysis
+from cg.models.cg_config import (
+    CGConfig,
+    ChanjoConfig,
+    IlluminaConfig,
+    RarediseaseConfig,
+    RunInstruments,
+    SlurmConfig,
+)
+from cg.models.deliverables.metric_deliverables import MetricsBase
+from cg.store.models import Application, ApplicationVersion, Sample
+from cg.store.store import Store
 
 
-def test_get_sample_sheet_content(
+@pytest.fixture
+def expected_wgs_qc_metrics() -> dict[str, dict[str, Any]]:
+    return {
+        "PERCENT_DUPLICATION": {"norm": "lt", "threshold": 0.20},
+        "FREEMIX": {"norm": "lt", "threshold": 0.02},
+        "PCT_PF_UQ_READS_ALIGNED": {"norm": "gt", "threshold": 0.95},
+        "PCT_TARGET_BASES_10X": {"norm": "gt", "threshold": 0.95},
+        "AT_DROPOUT": {"norm": "lt", "threshold": 5},
+        "GC_DROPOUT": {"norm": "lt", "threshold": 5},
+        "MEDIAN_TARGET_COVERAGE": {"norm": "gt", "threshold": 25},
+        "predicted_sex_sex_check": {"norm": "eq", "threshold": SexOptions.FEMALE},
+        "gender": {"norm": "eq", "threshold": SexOptions.FEMALE},
+    }
+
+
+@pytest.fixture
+def expected_wes_qc_metrics() -> dict[str, dict[str, Any]]:
+    return {
+        "PERCENT_DUPLICATION": {"norm": "lt", "threshold": 0.20},
+        "PCT_PF_UQ_READS_ALIGNED": {"norm": "gt", "threshold": 0.95},
+        "PCT_TARGET_BASES_10X": {"norm": "gt", "threshold": 0.95},
+        "AT_DROPOUT": {"norm": "lt", "threshold": 10},
+        "GC_DROPOUT": {"norm": "lt", "threshold": 10},
+        "predicted_sex_sex_check": {"norm": "eq", "threshold": SexOptions.FEMALE},
+    }
+
+
+def test_parse_analysis(
     raredisease_context: CGConfig,
     raredisease_case_id: str,
+    sample_id: str,
+    raredisease_multiqc_json_metrics: dict,
+    raredisease_mock_analysis_finish,
 ):
-    """Test Raredisease nextflow sample sheet creation."""
+    """Test Raredisease output analysis files parsing."""
+
+    # GIVEN a Raredisease analysis API and a list of QC metrics
+    analysis_api: RarediseaseAnalysisAPI = raredisease_context.meta_apis["analysis_api"]
+    qc_metrics: list[MetricsBase] = analysis_api.get_multiqc_json_metrics(
+        case_id=raredisease_case_id
+    )
+
+    # WHEN extracting the analysis model
+    analysis_model: NextflowAnalysis = analysis_api.parse_analysis(qc_metrics)
+
+    # THEN the analysis model and its content should have been correctly extracted
+    assert analysis_model.sample_metrics[sample_id].model_dump() == {
+        "percent_duplication": 0.0438,
+        "picard_pct_pf_reads_aligned": 0.999729,
+        "predicted_sex_sex_check": SexOptions.FEMALE,
+    }
+
+
+def test_get_sample_coverage(raredisease_context: CGConfig, mocker: MockerFixture):
+    # GIVEN Raredisease case
+    sample: Sample = create_autospec(Sample, internal_id="internal_id")
+
+    # GIVEN a mocked chanjo API
+    chanjo_api: ChanjoAPI = create_autospec(ChanjoAPI)
+    chanjo_api.sample_coverage = Mock(
+        return_value={"mean_coverage": 28.9, "mean_completeness": 88.5}
+    )
+    mock_chanjo_factory = mocker.patch.object(
+        raredisease_analysis_api, "chanjo_api_for_genome_build", return_value=chanjo_api
+    )
+
+    get_sample_coverage_spy = mocker.spy(raredisease_analysis_api, "chanjo1_get_sample_coverage")
 
     # GIVEN Raredisease analysis API
-    analysis_api: RarediseaseAnalysisAPI = raredisease_context.meta_apis["analysis_api"]
-
-    # WHEN getting the sample sheet content
-    result = analysis_api.get_sample_sheet_content(case_id=raredisease_case_id)
-
-    # THEN return should contain patterns
-    patterns = [
-        "ADM1",
-        "XXXXXXXXX_000000_S000_L001_R1_001.fastq.gz",
-        "raredisease_case_enough_reads",
-    ]
-
-    contains_pattern = any(
-        any(any(pattern in sub_element for pattern in patterns) for sub_element in element)
-        for element in result
+    analysis_api: RarediseaseAnalysisAPI = RarediseaseAnalysisAPI(
+        config=raredisease_context,
     )
-    assert contains_pattern
+
+    # GIVEN a response from ScoutAPI
+    mocker.patch.object(ScoutAPI, "get_genes", return_value=[])
+
+    # GIVEN some gene ids
+    gene_ids: list[int] = [1, 2, 3]
+
+    # WHEN getting the chanjo coverage for the sample
+    sample_coverage: CoverageMetricsChanjo1 | None = analysis_api.get_sample_coverage(
+        case_id="case_id", sample_id=sample.internal_id, gene_ids=gene_ids
+    )
+
+    assert sample_coverage == CoverageMetricsChanjo1(
+        coverage_completeness_percent=88.5, mean_coverage=28.9
+    )
+
+    # THEN chanjo was configured with the correct config
+    mock_chanjo_factory.assert_called_once_with(
+        config=raredisease_context, genome_build=GenomeBuild.hg38
+    )
+
+    # THEN the sample coverage should have been called with the right information
+    get_sample_coverage_spy.assert_called_once_with(
+        chanjo_api=chanjo_api, gene_ids=gene_ids, sample_id="internal_id"
+    )
 
 
-def test_write_params_file(raredisease_context: CGConfig, raredisease_case_id: str, mocker):
-    # GIVEN Raredisease analysis API and input (nextflow sample sheet path)/output (case directory) parameters
-    analysis_api: RarediseaseAnalysisAPI = raredisease_context.meta_apis["analysis_api"]
+def test_get_genome_build():
+    # GIVEN the RarediseaseAnalysisAPI
+    cg_config: CGConfig = create_autospec(
+        CGConfig,
+        raredisease=create_autospec(
+            RarediseaseConfig,
+            conda_binary="conda/bin",
+            conda_env="conda/env",
+            config="here/is/my/config",
+            pipeline_deliverables="pipeline_deliverables.yaml",
+            params="here/is/my/params/file",
+            platform="platform",
+            profile="profile",
+            rank_model_threshold=5,
+            reference="raredisease_reference.fasta",
+            resources="resources",
+            revision="1.0.0",
+            root="/I/am/Root",
+            slurm=create_autospec(SlurmConfig, account="account", mail_user="user"),
+            tower_workflow=Workflow.RAREDISEASE,
+            workflow_bin_path=Path("I", "am", "workflow", "bin", "path"),
+        ),
+        chanjo_38=ChanjoConfig(binary_path="binary/path", config_path="config/path"),
+        data_flow=Mock(),
+        run_instruments=create_autospec(
+            RunInstruments,
+            illumina=create_autospec(IlluminaConfig, demultiplexed_runs_dir="some_dir"),
+        ),
+        tower_binary_path="tower/path",
+    )
 
-    # WHEN creating case directory
-    analysis_api.create_case_directory(case_id=raredisease_case_id, dry_run=False)
+    analysis_api = RarediseaseAnalysisAPI(config=cg_config)
 
-    # THEN care directory is created
-    assert os.path.exists(analysis_api.get_case_path(case_id=raredisease_case_id))
+    # WHEN getting the genome build
+    # THEN it is hg38
+    assert analysis_api.get_genome_build(case_id="ChevyCase") == GenomeVersion.HG38
 
-    mocker.patch.object(RarediseaseAnalysisAPI, "get_target_bed_from_lims")
-    RarediseaseAnalysisAPI.get_target_bed_from_lims.return_value = "some_target_bed_file"
 
-    # WHEN writing parameters file
-    analysis_api.write_params_file(case_id=raredisease_case_id)
-
-    # THEN the file is created
-    assert os.path.isfile(analysis_api.get_params_file_path(case_id=raredisease_case_id))
-
-    # WHEN writing config file
-    analysis_api.create_nextflow_config(case_id=raredisease_case_id)
-
-    # THEN the file is created
-    assert os.path.isfile(analysis_api.get_nextflow_config_path(case_id=raredisease_case_id))
+@pytest.mark.parametrize(
+    "prep_category, expected_conditions_fixture",
+    [
+        (SeqLibraryPrepCategory.WHOLE_GENOME_SEQUENCING, "expected_wgs_qc_metrics"),
+        (SeqLibraryPrepCategory.WHOLE_EXOME_SEQUENCING, "expected_wes_qc_metrics"),
+    ],
+)
+def test_get_qc_conditions_for_workflow(
+    prep_category: SeqLibraryPrepCategory,
+    expected_conditions_fixture: str,
+    request: pytest.FixtureRequest,
+):
+    application_version: ApplicationVersion = create_autospec(
+        ApplicationVersion, application=create_autospec(Application, analysis_type=prep_category)
+    )
+    sample = create_autospec(
+        Sample,
+        internal_id="sample_id",
+        sex=SexOptions.FEMALE,
+        application_version=application_version,
+    )
+    status_db = create_autospec(Store)
+    status_db.get_sample_by_internal_id = Mock(return_value=sample)
+    # GIVEN Raredisease analysis API
+    analysis_api: RarediseaseAnalysisAPI = RarediseaseAnalysisAPI(
+        config=create_autospec(
+            CGConfig,
+            run_instruments=create_autospec(
+                RunInstruments,
+                illumina=create_autospec(IlluminaConfig, demultiplexed_runs_dir="some/path"),
+            ),
+            chanjo_38=create_autospec(
+                ChanjoConfig, config_path="some/path", binary_path="some/path"
+            ),
+            raredisease=create_autospec(
+                RarediseaseConfig,
+                conda_binary="conda/bin",
+                conda_env="conda_env",
+                config="config.json",
+                params="params.yaml",
+                pipeline_deliverables="raredisease_deliverables.yaml",
+                platform="platform",
+                profile="profile",
+                rank_model_threshold=5,
+                reference="reference.fasta",
+                resources="a tonne",
+                revision="0.0.0",
+                root="root",
+                slurm=create_autospec(SlurmConfig, account="account", mail_user="mail_user"),
+                tower_workflow="raredisease",
+                workflow_bin_path="workflow/bin",
+            ),
+            tower_binary_path="tower/bin",
+        ),
+    )
+    analysis_api.status_db = status_db
+    qc_conditions: dict = analysis_api.get_qc_conditions_for_workflow("sample_id")
+    expected_conditions: dict = request.getfixturevalue(expected_conditions_fixture)
+    assert qc_conditions == expected_conditions

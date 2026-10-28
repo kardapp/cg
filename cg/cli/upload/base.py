@@ -9,10 +9,9 @@ import rich_click as click
 from cg.cli.upload.coverage import upload_coverage
 from cg.cli.upload.delivery_report import upload_delivery_report_to_scout
 from cg.cli.upload.fohm import fohm
-from cg.cli.upload.genotype import upload_genotypes
 from cg.cli.upload.gens import upload_to_gens
 from cg.cli.upload.gisaid import upload_to_gisaid
-from cg.cli.upload.mutacc import process_solved, processed_solved
+from cg.cli.upload.mutacc import mutacc
 from cg.cli.upload.nipt import nipt
 from cg.cli.upload.observations import (
     upload_available_observations_to_loqusdb,
@@ -40,9 +39,10 @@ from cg.meta.upload.microsalt.microsalt_upload_api import MicrosaltUploadAPI
 from cg.meta.upload.mip.mip_dna import MipDNAUploadAPI
 from cg.meta.upload.mip.mip_rna import MipRNAUploadAPI
 from cg.meta.upload.mutant.mutant import MutantUploadAPI
-from cg.meta.upload.nallo.nallo import NalloUploadAPI
+from cg.meta.upload.nallo.nallo_upload_api import NalloUploadAPI
 from cg.meta.upload.nf_analysis import NfAnalysisUploadAPI
 from cg.meta.upload.raredisease.raredisease import RarediseaseUploadAPI
+from cg.meta.upload.raw_data.raw_data_upload_api import RawDataUploadAPI
 from cg.meta.upload.tomte.tomte import TomteUploadAPI
 from cg.meta.upload.upload_api import UploadAPI
 from cg.models.cg_config import CGConfig
@@ -75,7 +75,7 @@ def upload(context: click.Context, case_id: str | None, restart: bool):
     elif case_id:  # Provided case ID without a subcommand: upload everything
         try:
             upload_api.analysis_api.status_db.verify_case_exists(case_id)
-            case: Case = upload_api.status_db.get_case_by_internal_id(case_id)
+            case: Case = upload_api.status_db.get_case_by_internal_id_strict(case_id)
             upload_api.verify_analysis_upload(case_obj=case, restart=restart)
         except AnalysisAlreadyUploadedError:
             # Analysis being uploaded or it has been already uploaded
@@ -100,10 +100,12 @@ def upload(context: click.Context, case_id: str | None, restart: bool):
             upload_api = NfAnalysisUploadAPI(config_object, case.data_analysis)
         elif case.data_analysis == Workflow.MUTANT:
             upload_api = MutantUploadAPI(config_object)
+        elif case.data_analysis == Workflow.RAW_DATA:
+            upload_api = RawDataUploadAPI(config_object)
 
         context.obj.meta_apis["upload_api"] = upload_api
         upload_api.upload(ctx=context, case=case, restart=restart)
-        click.echo(click.style(f"{case_id} analysis has been successfully uploaded", fg="green"))
+        click.echo(click.style(f"Upload process for {case_id} successfully executed", fg="green"))
     else:
         suggest_cases_to_upload(status_db=upload_api.status_db)
         raise click.Abort()
@@ -130,7 +132,12 @@ def upload_all_completed_analyses(context: click.Context, workflow: Workflow = N
                 f"Case has been already uploaded at {latest_case_analysis.uploaded_at}."
             )
             continue
-
+        if latest_case_analysis.upload_started_at is not None:
+            LOG.warning(
+                f"Skipping upload for case {analysis.case.internal_id}. "
+                f"Case upload has already started at {latest_case_analysis.upload_started_at}."
+            )
+            continue
         case_id = analysis.case.internal_id
         LOG.info(f"Uploading analysis for case: {case_id}")
         try:
@@ -145,14 +152,12 @@ def upload_all_completed_analyses(context: click.Context, workflow: Workflow = N
 
 upload.add_command(create_scout_load_config)
 upload.add_command(fohm)
+upload.add_command(mutacc)
 upload.add_command(nipt)
-upload.add_command(process_solved)
-upload.add_command(processed_solved)
 upload.add_command(upload_available_observations_to_loqusdb)
 upload.add_command(upload_case_to_scout)
 upload.add_command(upload_coverage)
 upload.add_command(upload_delivery_report_to_scout)
-upload.add_command(upload_genotypes)
 upload.add_command(upload_multiqc_to_scout)
 upload.add_command(upload_observations_to_loqusdb)
 upload.add_command(upload_rna_alignment_file_to_scout)

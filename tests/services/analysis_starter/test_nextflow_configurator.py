@@ -1,6 +1,6 @@
 from datetime import datetime
 from pathlib import Path
-from typing import cast
+from typing import Callable, cast
 from unittest.mock import Mock, create_autospec
 
 import pytest
@@ -16,6 +16,8 @@ from cg.models.cg_config import (
     RarediseaseConfig,
     RnafusionConfig,
     TaxprofilerConfig,
+    TomteConfig,
+    TranaConfig,
 )
 from cg.services.analysis_starter.configurator.extensions.pipeline_extension import (
     PipelineExtension,
@@ -30,7 +32,7 @@ from cg.services.analysis_starter.configurator.file_creators.nextflow.params_fil
 from cg.services.analysis_starter.configurator.file_creators.nextflow.params_file.nallo import (
     NalloParamsFileCreator,
 )
-from cg.services.analysis_starter.configurator.file_creators.nextflow.params_file.raredisease import (
+from cg.services.analysis_starter.configurator.file_creators.nextflow.params_file.raredisease_params_file_creator import (
     RarediseaseParamsFileCreator,
 )
 from cg.services.analysis_starter.configurator.file_creators.nextflow.params_file.rnafusion import (
@@ -39,17 +41,29 @@ from cg.services.analysis_starter.configurator.file_creators.nextflow.params_fil
 from cg.services.analysis_starter.configurator.file_creators.nextflow.params_file.taxprofiler import (
     TaxprofilerParamsFileCreator,
 )
-from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.nallo import (
+from cg.services.analysis_starter.configurator.file_creators.nextflow.params_file.tomte_params_file_creator import (
+    TomteParamsFileCreator,
+)
+from cg.services.analysis_starter.configurator.file_creators.nextflow.params_file.trana_params_file_creator import (
+    TranaParamsFileCreator,
+)
+from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.nallo_sample_sheet_creator import (
     NalloSampleSheetCreator,
 )
-from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.raredisease import (
+from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.raredisease_sample_sheet_creator import (
     RarediseaseSampleSheetCreator,
 )
-from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.rnafusion import (
+from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.rnafusion_sample_sheet_creator import (
     RNAFusionSampleSheetCreator,
 )
-from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.taxprofiler import (
+from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.taxprofiler_sample_sheet_creator import (
     TaxprofilerSampleSheetCreator,
+)
+from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.tomte_sample_sheet_creator import (
+    TomteSampleSheetCreator,
+)
+from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.trana_sample_sheet_creator import (
+    TranaSampleSheetCreator,
 )
 from cg.services.analysis_starter.configurator.implementations.nextflow import NextflowConfigurator
 from cg.services.analysis_starter.configurator.models.nextflow import NextflowCaseConfig
@@ -59,19 +73,27 @@ from cg.store.store import Store
 
 @pytest.mark.parametrize(
     "workflow",
-    [Workflow.NALLO, Workflow.RAREDISEASE, Workflow.RNAFUSION, Workflow.TAXPROFILER],
+    [
+        Workflow.NALLO,
+        Workflow.RAREDISEASE,
+        Workflow.RNAFUSION,
+        Workflow.TAXPROFILER,
+        Workflow.TOMTE,
+        Workflow.TRANA_16S,
+        Workflow.TRANA_ITS,
+    ],
 )
 def test_get_config(
     workflow: Workflow,
     nextflow_case_id: str,
     nextflow_root: str,
-    configurator_scenario: dict,
+    configurator_scenario: Callable[[Workflow], tuple[NextflowConfigurator, NextflowCaseConfig]],
     mocker: MockerFixture,
 ):
     """Test creating the case config for all Nextflow pipelines."""
 
     # GIVEN a Nextflow configurator and an expected case config
-    configurator, expected_case_config = configurator_scenario[workflow]
+    configurator, expected_case_config = configurator_scenario(workflow)
 
     # GIVEN that all expected files are mocked to exist
     mocker.patch.object(Path, "exists", return_value=True)
@@ -99,6 +121,7 @@ def test_get_config_missing_required_files(mocker: MockerFixture):
     pipeline_config = create_autospec(
         RarediseaseConfig,
         root="/root",
+        reference="raredisease_reference.fasta",
         repository="https://repo.scilifelab.se",
         revision="rev123",
         profile="profile",
@@ -142,19 +165,27 @@ def test_get_config_missing_required_files(mocker: MockerFixture):
 
 @pytest.mark.parametrize(
     "workflow",
-    [Workflow.NALLO, Workflow.RAREDISEASE, Workflow.RNAFUSION, Workflow.TAXPROFILER],
+    [
+        Workflow.NALLO,
+        Workflow.RAREDISEASE,
+        Workflow.RNAFUSION,
+        Workflow.TAXPROFILER,
+        Workflow.TOMTE,
+        Workflow.TRANA_16S,
+        Workflow.TRANA_ITS,
+    ],
 )
 def test_get_case_config_flags(
     workflow: Workflow,
     nextflow_case_id: str,
     nextflow_root: str,
-    configurator_scenario: dict,
+    configurator_scenario: Callable[[Workflow], tuple[NextflowConfigurator, NextflowCaseConfig]],
     mocker: MockerFixture,
 ):
     """Test that using flags when configuring a case overrides the case config default values."""
 
     # GIVEN a Nextflow configurator
-    configurator, _ = configurator_scenario[workflow]
+    configurator, _ = configurator_scenario(workflow)
 
     # GIVEN that all expected files are mocked to exist
     mocker.patch.object(Path, "exists", return_value=True)
@@ -167,6 +198,29 @@ def test_get_case_config_flags(
 
     # THEN we should get back a case config with updated value
     assert case_config.revision == "revision"
+
+
+def test_get_case_config_fake_flags(
+    raredisease_configurator: NextflowConfigurator,
+    mocker: MockerFixture,
+):
+    """Test that flags with nonsensical names are ignored."""
+
+    # GIVEN a configurator
+
+    # GIVEN that all expected files are mocked to exist
+    mocker.patch.object(Path, "exists", return_value=True)
+    mocker.patch.object(
+        raredisease_configurator.pipeline_extension, "do_required_files_exist", return_value=True
+    )
+
+    # WHEN getting the case config using a non-existent flag
+    case_config: NextflowCaseConfig = raredisease_configurator.get_config(
+        case_id="case_id", fake_flag="fake-flag"
+    )
+
+    # THEN the case config should not contain the flag
+    assert not getattr(case_config, "fake_flag", None)
 
 
 def test_get_config_resume(
@@ -219,19 +273,27 @@ def test_get_config_resume_already_completed_analysis(
 
 @pytest.mark.parametrize(
     "workflow",
-    [Workflow.NALLO, Workflow.RAREDISEASE, Workflow.RNAFUSION, Workflow.TAXPROFILER],
+    [
+        Workflow.NALLO,
+        Workflow.RAREDISEASE,
+        Workflow.RNAFUSION,
+        Workflow.TAXPROFILER,
+        Workflow.TOMTE,
+        Workflow.TRANA_16S,
+        Workflow.TRANA_ITS,
+    ],
 )
 def test_get_case_config_none_flags(
     workflow: Workflow,
     nextflow_case_id: str,
     nextflow_root: str,
-    configurator_scenario: dict,
+    configurator_scenario: Callable[[Workflow], tuple[NextflowConfigurator, NextflowCaseConfig]],
     mocker: MockerFixture,
 ):
     """Test that setting a flag to None does not override configurator fields with None."""
 
     # GIVEN a Nextflow configurator
-    configurator, _ = configurator_scenario[workflow]
+    configurator, _ = configurator_scenario(workflow)
 
     # GIVEN that all expected files are mocked to exist
     mocker.patch.object(Path, "exists", return_value=True)
@@ -275,8 +337,26 @@ def test_get_case_config_none_flags(
             TaxprofilerConfig,
             TaxprofilerSampleSheetCreator,
         ),
+        (
+            Workflow.TOMTE,
+            TomteParamsFileCreator,
+            TomteConfig,
+            TomteSampleSheetCreator,
+        ),
+        (
+            Workflow.TRANA_16S,
+            TranaParamsFileCreator,
+            TranaConfig,
+            TranaSampleSheetCreator,
+        ),
+        (
+            Workflow.TRANA_ITS,
+            TranaParamsFileCreator,
+            TranaConfig,
+            TranaSampleSheetCreator,
+        ),
     ],
-    ids=["Nallo", "raredisease", "RNAFUSION", "Taxprofiler"],
+    ids=["Nallo", "raredisease", "RNAFUSION", "Taxprofiler", "Tomte", "Trana 16S", "Trana ITS"],
 )
 def test_configure(
     workflow: Workflow,

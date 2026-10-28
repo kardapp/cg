@@ -63,8 +63,26 @@ MASTER_STEPS_UDFS = {
         "Target enrichment TWIST v1": "Bait Set",
         "Library Prep (Dev) v3": "Bait Set",
     },
-    "rna_prep_step": {
-        "Aliquot Samples for Fragmentation (RNA) v1": "Amount needed (ng)",
+    "input_amounts": {
+        "revio": {
+            "Normalization of samples for Shearing or Library Prep (Revio) v1": "Amount needed (ng)"
+        },
+        "tgs": {
+            "Aliquot samples for enzymatic fragmentation TWIST v2": "Amount needed (ng)",
+            "Aliquot samples for enzymatic fragmentation TWIST v1": "Amount needed (ng)",
+            "CG002 - Aliquot Samples for Covaris": "Amount needed (ng)",
+            "obsolete_CG001 - Aliquot Samples for Covaris": "Amount needed (ng)",
+        },
+        "wgs": {
+            "Aliquot samples for WGS v1": "Amount needed (ng)",
+            "Aliquot Samples for Covaris": "Amount needed (ng)",
+            "CG002 - Aliquot Samples for Covaris": "Amount needed (ng)",
+            "obsolete_CG001 - Aliquot Samples for Covaris": "Amount needed (ng)",
+        },
+        "wts": {
+            "Aliquot Samples for Fragmentation (RNA) v1": "Amount needed (ng)",
+            "Aliquot Samples for RNA Depletion v1": "Amount needed (ng)",
+        },
     },
     "prep_method_step": {
         "Library Preparation (Cov) v1": {
@@ -121,6 +139,10 @@ MASTER_STEPS_UDFS = {
             "atlas_document": "Library Preparation Method",
             "atlas_version": "Atlas Version",
         },
+        "FFPE Treatment & Library Prep (RNA Depletion) v1": {
+            "atlas_document": "Library Preparation Method",
+            "atlas_version": "Atlas Version",
+        },
     },
     "sequencing_method_step": {
         "CG002 - Cluster Generation (HiSeq X)": {
@@ -145,6 +167,10 @@ MASTER_STEPS_UDFS = {
             "atlas_document": "Sequencing Method",
             "atlas_version": "Atlas Version",
         },
+        "Set Up Sequencing Run (Revio) v2": {
+            "atlas_document": "Sequencing Method",
+            "atlas_version": "Atlas Version",
+        },
     },
     "delivery_method_step": {
         "CG002 - Delivery": {
@@ -162,14 +188,21 @@ MASTER_STEPS_UDFS = {
 
 
 class DocumentationMethod(StrEnum):
-    ATLAS: str = "Atlas"
-    AM: str = "AM"
+    ATLAS = "Atlas"
+    AM = "AM"
 
 
 class LimsArtifactTypes(StrEnum):
-    ANALYTE: str = "Analyte"
-    RESULT_FILE: str = "ResultFile"
+    ANALYTE = "Analyte"
+    RESULT_FILE = "ResultFile"
 
 
 class LimsProcess(StrEnum):
-    COVID_POOLING_STEP: str = "Pooling and Clean-up (Cov) v1"
+    COVID_POOLING_STEP = "Pooling and Clean-up (Cov) v1"
+
+
+class LimsStatus(StrEnum):
+    DONE = "done"
+    PENDING = "pending"
+    RE_PREP = "re-prep"
+    TOP_UP = "top-up"

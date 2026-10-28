@@ -1,8 +1,11 @@
+import logging
 from collections import Counter
 
+from cg.constants.constants import DataDelivery
+from cg.exc import CustomerNotFoundError, SampleNotFoundError
 from cg.models.orders.constants import OrderType
+from cg.models.orders.sample_base import SexEnum
 from cg.services.orders.validation.constants import ALLOWED_SKIP_RC_BUFFERS
-from cg.services.orders.validation.errors.case_errors import InvalidGenePanelsError
 from cg.services.orders.validation.errors.case_sample_errors import (
     ApplicationArchivedError,
     ApplicationNotCompatibleError,
@@ -10,6 +13,7 @@ from cg.services.orders.validation.errors.case_sample_errors import (
     BufferMissingError,
     CaptureKitMissingError,
     CaptureKitResetError,
+    CaseSampleError,
     ConcentrationRequiredIfSkipRCError,
     ContainerNameMissingError,
     ContainerNameRepeatedError,
@@ -21,7 +25,11 @@ from cg.services.orders.validation.errors.case_sample_errors import (
     InvalidFatherSexError,
     InvalidMotherSexError,
     InvalidVolumeError,
+    MissingDNASampleError,
+    MissingSourceCommentError,
     MotherNotInCaseError,
+    NormalSampleNotAllowedError,
+    NoSubjectIDError,
     OccupiedWellError,
     PedigreeError,
     SampleDoesNotExistError,
@@ -30,9 +38,11 @@ from cg.services.orders.validation.errors.case_sample_errors import (
     SampleNameSameAsCaseNameError,
     SampleOutsideOfCollaborationError,
     SexSubjectIdError,
+    SexUnknownWarning,
     StatusUnknownError,
     SubjectIdSameAsCaseNameError,
     SubjectIdSameAsSampleNameError,
+    TumourValueResetError,
     VolumeRequiredError,
     WellFormatError,
     WellPositionMissingError,
@@ -41,6 +51,11 @@ from cg.services.orders.validation.models.order_with_cases import OrderWithCases
 from cg.services.orders.validation.models.sample_aliases import SampleInCase
 from cg.services.orders.validation.order_types.balsamic.models.order import BalsamicOrder
 from cg.services.orders.validation.order_types.balsamic_umi.models.order import BalsamicUmiOrder
+from cg.services.orders.validation.order_types.mip_dna.models.order import MIPDNAOrder
+from cg.services.orders.validation.order_types.mip_rna.models.order import MIPRNAOrder
+from cg.services.orders.validation.order_types.nallo.models.order import NalloOrder
+from cg.services.orders.validation.order_types.rna_fusion.models.order import RNAFusionOrder
+from cg.services.orders.validation.order_types.tomte.models.order import TomteOrder
 from cg.services.orders.validation.rules.case_sample.pedigree.validate_pedigree import (
     get_pedigree_errors,
 )
@@ -51,10 +66,10 @@ from cg.services.orders.validation.rules.case_sample.utils import (
     get_existing_sample_names,
     get_father_case_errors,
     get_father_sex_errors,
-    get_invalid_panels,
     get_mother_case_errors,
     get_mother_sex_errors,
     get_occupied_well_errors,
+    get_subject_id,
     get_well_sample_map,
     has_sex_and_subject,
     is_buffer_missing,
@@ -78,6 +93,8 @@ from cg.services.orders.validation.rules.utils import (
 )
 from cg.store.models import Sample as DbSample
 from cg.store.store import Store
+
+LOG = logging.getLogger(__name__)
 
 
 def validate_application_compatibility(
@@ -206,19 +223,6 @@ def validate_application_not_archived(
     return errors
 
 
-def validate_gene_panels_exist(
-    order: OrderWithCases,
-    store: Store,
-    **kwargs,
-) -> list[InvalidGenePanelsError]:
-    errors: list[InvalidGenePanelsError] = []
-    for case_index, case in order.enumerated_new_cases:
-        if invalid_panels := get_invalid_panels(panels=case.panels, store=store):
-            case_error = InvalidGenePanelsError(case_index=case_index, panels=invalid_panels)
-            errors.append(case_error)
-    return errors
-
-
 def validate_volume_interval(order: OrderWithCases, **kwargs) -> list[InvalidVolumeError]:
     errors: list[InvalidVolumeError] = []
     for case_index, case in order.enumerated_new_cases:
@@ -247,8 +251,8 @@ def validate_samples_exist(
     errors: list[SampleDoesNotExistError] = []
     for case_index, case in order.enumerated_new_cases:
         for sample_index, sample in case.enumerated_existing_samples:
-            sample: DbSample | None = store.get_sample_by_internal_id(sample.internal_id)
-            if not sample:
+            db_sample: DbSample | None = store.get_sample_by_internal_id(sample.internal_id)
+            if not db_sample:
                 error = SampleDoesNotExistError(case_index=case_index, sample_index=sample_index)
                 errors.append(error)
     return errors
@@ -279,7 +283,7 @@ def validate_sample_names_not_repeated(
     return [
         SampleNameRepeatedError(case_index=case_index, sample_index=sample_index)
         for case_index, sample_index, sample in new_samples
-        if sample_name_counter.get(sample.name) > 1 or sample.name in old_sample_names
+        if sample_name_counter.get(sample.name, 0) > 1 or sample.name in old_sample_names
     ]
 
 
@@ -543,4 +547,95 @@ def validate_sample_names_available(
         if store.is_sample_name_used(sample=sample, customer_entry_id=customer_entry_id):
             error = SampleNameAlreadyExistsError(case_index=case_index, sample_index=sample_index)
             errors.append(error)
+    return errors
+
+
+def validate_source_comment_required(
+    order: (
+        BalsamicOrder
+        | BalsamicUmiOrder
+        | MIPDNAOrder
+        | MIPRNAOrder
+        | NalloOrder
+        | RNAFusionOrder
+        | TomteOrder
+    ),
+    **kwargs,
+) -> list[MissingSourceCommentError]:
+    errors: list[MissingSourceCommentError] = []
+    for case_index, case in order.enumerated_new_cases:
+        for sample_index, sample in case.enumerated_new_samples:
+            if sample.source == "other" and not sample.source_comment:
+                error = MissingSourceCommentError(case_index=case_index, sample_index=sample_index)
+                errors.append(error)
+    return errors
+
+
+def validate_existing_samples_not_normal(
+    order: RNAFusionOrder, store: Store, **kwargs
+) -> list[NormalSampleNotAllowedError]:
+    errors: list[NormalSampleNotAllowedError] = []
+    for case_index, sample_index, sample in order.enumerated_existing_samples:
+        if db_sample := store.get_sample_by_internal_id(  # If it is not found in the database, the error should be raised elsewhere
+            sample.internal_id
+        ):
+            if not db_sample.is_tumour:
+                error = NormalSampleNotAllowedError(
+                    case_index=case_index, sample_index=sample_index
+                )
+                errors.append(error)
+    return errors
+
+
+def reset_tumour_values_to_true(order: RNAFusionOrder, **kwargs):
+    errors: list[TumourValueResetError] = []
+    for case_index, sample_index, sample in order.enumerated_new_samples:
+        if not sample.tumour:
+            sample.tumour = True
+            error = TumourValueResetError(case_index=case_index, sample_index=sample_index)
+            errors.append(error)
+    return errors
+
+
+def warn_if_sex_unknown(order: OrderWithCases, **kwargs) -> list[SexUnknownWarning]:
+    warnings: list[SexUnknownWarning] = []
+
+    for case_index, sample_index, sample in order.enumerated_new_samples:
+        if sample.sex == SexEnum.unknown:
+            warning = SexUnknownWarning(case_index=case_index, sample_index=sample_index)
+            warnings.append(warning)
+
+    return warnings
+
+
+def validate_matching_normal_dna_for_rna_samples(
+    order: TomteOrder, store: Store, **kwargs
+) -> list[CaseSampleError]:
+    """
+    Validates that each sample in the order has a matching non-tumour DNA sample in StatusDB.
+    RNA cases do not have their own entries in Scout, so for Scout uploads to go through,
+    matching DNA samples must be found.
+    """
+    if DataDelivery.SCOUT not in order.delivery_type:
+        return []
+    errors: list[CaseSampleError] = []
+    for case_index, case in order.enumerated_new_cases:
+        for sample_index, sample in case.enumerated_samples:
+            try:
+                subject_id: str | None = get_subject_id(sample=sample, store=store)
+                if not subject_id:
+                    error = NoSubjectIDError(case_index=case_index, sample_index=sample_index)
+                    errors.append(error)
+                    continue
+                if not store.has_related_dna_sample(
+                    customer_id=order.customer, is_tumour=False, subject_id=subject_id
+                ):
+                    error = MissingDNASampleError(case_index=case_index, sample_index=sample_index)
+                    errors.append(error)
+            except CustomerNotFoundError:
+                # This should raise an error in other parts of the validation
+                LOG.warning(f"{order.customer} does not match a customer in StatusDB.")
+            except SampleNotFoundError:
+                # This should raise an error in other parts of the validation
+                LOG.warning(f"{sample.internal_id} does not match a sample in StatusDB.")
     return errors

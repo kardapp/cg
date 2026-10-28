@@ -1,4 +1,4 @@
-""" Start of CLI """
+"""Start of CLI"""
 
 import logging
 import sys
@@ -21,26 +21,20 @@ from cg.cli.downsample import downsample
 from cg.cli.generate.base import generate as generate_cmd
 from cg.cli.get import get
 from cg.cli.post_process.post_process import post_process_group as post_processing
+from cg.cli.receive_event import receive_event
 from cg.cli.sequencing_qc.sequencing_qc import sequencing_qc
 from cg.cli.set.base import set_cmd
 from cg.cli.store.base import store as store_cmd
 from cg.cli.transfer import transfer_group
 from cg.cli.upload.base import upload
-from cg.cli.utils import CLICK_CONTEXT_SETTINGS
+from cg.cli.utils import CLICK_CONTEXT_SETTINGS, LOG_LEVELS
 from cg.cli.workflow.base import workflow as workflow_cmd
-from cg.constants.cli_options import FORCE
 from cg.constants.constants import FileFormat
 from cg.io.controller import ReadFile
 from cg.models.cg_config import CGConfig
-from cg.store.database import (
-    create_all_tables,
-    drop_all_tables,
-    get_scoped_session_registry,
-    get_tables,
-)
+from cg.store.database import get_scoped_session_registry
 
 LOG = logging.getLogger(__name__)
-LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"]
 
 
 def teardown_session():
@@ -54,7 +48,11 @@ def teardown_session():
 @click.option("-c", "--config", type=click.Path(exists=True), help="path to config file")
 @click.option("-d", "--database", help="path/URI of the SQL database")
 @click.option(
-    "-l", "--log-level", type=click.Choice(LEVELS), default="INFO", help="lowest level to log at"
+    "-l",
+    "--log-level",
+    type=click.Choice(LOG_LEVELS),
+    default="INFO",
+    help="lowest level to log at",
 )
 @click.option("--verbose", is_flag=True, help="Show full log information, time stamp etc")
 @click.version_option(cg.__version__, prog_name=cg.__title__)
@@ -80,26 +78,6 @@ def base(
     )
     context.obj = CGConfig(**raw_config)
     context.call_on_close(teardown_session)
-
-
-@base.command()
-@click.option("--reset", is_flag=True, help="Reset database before setting up tables")
-@FORCE
-@click.pass_obj
-def init(context: CGConfig, reset: bool, force: bool):
-    """Setup the database."""
-    existing_tables: list[str] = get_tables()
-    if force or reset:
-        if existing_tables and not force:
-            message = f"Delete existing tables? [{', '.join(existing_tables)}]"
-            click.confirm(click.style(message, fg="yellow"), abort=True)
-        drop_all_tables()
-    elif existing_tables:
-        LOG.error("Database already exists, use '--reset'")
-        raise click.Abort
-
-    create_all_tables()
-    LOG.info(f"Success! New tables: {', '.join(get_tables())}")
 
 
 def find_commands(group, query: str) -> list[str]:
@@ -153,3 +131,4 @@ base.add_command(generate_cmd)
 base.add_command(downsample)
 base.add_command(post_processing)
 base.add_command(sequencing_qc)
+base.add_command(receive_event)

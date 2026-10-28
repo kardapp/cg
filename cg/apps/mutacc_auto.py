@@ -1,5 +1,5 @@
 """
-    Module for mutacc-auto API
+Module for mutacc-auto API
 """
 
 import copy
@@ -8,6 +8,7 @@ import subprocess
 
 from cg.constants.constants import FileFormat
 from cg.io.controller import WriteStream
+from cg.models.cg_config import MutaccAutoConfig
 
 LOG = logging.getLogger(__name__)
 
@@ -17,10 +18,10 @@ class MutaccAutoAPI:
     API for mutacc-auto
     """
 
-    def __init__(self, config: dict):
-        self.mutacc_auto_config = config["mutacc_auto"]["config_path"]
-        self.mutacc_auto_binary = config["mutacc_auto"]["binary_path"]
-        self.mutacc_padding = config["mutacc_auto"]["padding"]
+    def __init__(self, config: MutaccAutoConfig):
+        self.mutacc_auto_config = config.config_path
+        self.mutacc_auto_binary = config.binary_path
+        self.mutacc_padding = config.padding
         self.base_call = [self.mutacc_auto_binary, "--config-file", self.mutacc_auto_config]
 
     def extract_reads(self, case: dict, variants: dict):
@@ -48,6 +49,7 @@ class MutaccAutoAPI:
                 WriteStream.write_stream_from_content(content=case, file_format=FileFormat.JSON),
                 "--padding",
                 str(self.mutacc_padding),
+                "--conda",
             ]
         )
 

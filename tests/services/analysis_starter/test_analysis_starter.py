@@ -13,14 +13,19 @@ from cg.apps.tb import TrailblazerAPI
 from cg.apps.tb.models import TrailblazerAnalysis
 from cg.constants import Workflow
 from cg.constants.priority import Priority, SlurmQos
-from cg.exc import AnalysisNotReadyError, SeqeraError
+from cg.exc import AnalysisNotReadyError, CaseWorkflowMismatchError, SeqeraError
 from cg.models.cg_config import CGConfig
+from cg.services.analysis_starter.analysis_input_validator.implementations.fastq_fetcher import (
+    FastqFetcher,
+)
 from cg.services.analysis_starter.analysis_starter import AnalysisStarter
 from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet import creator
-from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.rnafusion import (
+from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.rnafusion_sample_sheet_creator import (
     RNAFusionSampleSheetCreator,
 )
-from cg.services.analysis_starter.configurator.implementations.balsamic import BalsamicConfigurator
+from cg.services.analysis_starter.configurator.implementations.balsamic_configurator import (
+    BalsamicConfigurator,
+)
 from cg.services.analysis_starter.configurator.implementations.microsalt import (
     MicrosaltConfigurator,
 )
@@ -31,7 +36,6 @@ from cg.services.analysis_starter.configurator.models.microsalt import Microsalt
 from cg.services.analysis_starter.configurator.models.mip_dna import MIPDNACaseConfig
 from cg.services.analysis_starter.configurator.models.nextflow import NextflowCaseConfig
 from cg.services.analysis_starter.factories.starter_factory import AnalysisStarterFactory
-from cg.services.analysis_starter.input_fetcher.implementations.fastq_fetcher import FastqFetcher
 from cg.services.analysis_starter.submitters.seqera_platform.seqera_platform_submitter import (
     SeqeraPlatformSubmitter,
 )
@@ -64,6 +68,13 @@ def analysis_starter_scenario(
     """
     return {
         Workflow.BALSAMIC: (
+            create_autospec(BalsamicConfigurator),
+            create_autospec(BalsamicCaseConfig),
+            create_autospec(SubprocessSubmitter),
+            create_autospec(BalsamicTracker),
+            create_autospec(BalsamicCaseConfig),
+        ),
+        Workflow.BALSAMIC_UMI: (
             create_autospec(BalsamicConfigurator),
             create_autospec(BalsamicCaseConfig),
             create_autospec(SubprocessSubmitter),
@@ -112,6 +123,7 @@ def analysis_starter_scenario(
     "workflow",
     [
         Workflow.BALSAMIC,
+        Workflow.BALSAMIC_UMI,
         Workflow.MICROSALT,
         Workflow.MIP_DNA,
         Workflow.RNAFUSION,
@@ -123,7 +135,7 @@ def analysis_starter_scenario(
     "attribute_name, function_name, error, expected_exit",
     [
         ("tracker", "ensure_analysis_not_ongoing", None, True),
-        ("input_fetcher", "ensure_files_are_ready", AnalysisNotReadyError, True),
+        ("analysis_input_validator", "ensure_files_are_ready", AnalysisNotReadyError, True),
         ("tracker", "ensure_analysis_not_ongoing", Exception, False),
     ],
     ids=["Success", "Fastqs missing", "General error"],
@@ -141,8 +153,9 @@ def test_analysis_starter_start_available_error_handling(
     """
     # GIVEN a Store with a mock case
     mock_store: TypedMock[Store] = create_typed_mock(Store)
-    mock_case: Case = create_autospec(Case)
+    mock_case: Case = create_autospec(Case, data_analysis=workflow)
     mock_store.as_mock.get_cases_to_analyze.return_value = [mock_case]
+    mock_store.as_mock.get_case_by_internal_id_strict.return_value = mock_case
 
     # GIVEN a Submitter
     submitter: Submitter = create_autospec(Submitter)
@@ -151,7 +164,7 @@ def test_analysis_starter_start_available_error_handling(
     # GIVEN an analysis starter
     analysis_starter = AnalysisStarter(
         configurator=create_autospec(NextflowConfigurator),
-        input_fetcher=create_autospec(FastqFetcher),
+        analysis_input_validator=create_autospec(FastqFetcher),
         store=mock_store.as_type,
         submitter=submitter,
         tracker=create_autospec(NextflowTracker),
@@ -192,7 +205,7 @@ def test_rnafusion_start(
 
     # GIVEN a case with appropriate parameters set
     mock_sample: Sample = create_autospec(Sample)
-    mock_case: Case = create_autospec(Case, samples=[mock_sample])
+    mock_case: Case = create_autospec(Case, samples=[mock_sample], workflow=Workflow.RNAFUSION)
     mock_store.get_case_by_internal_id_strict = Mock(return_value=mock_case)
     mock_case.priority = Priority.standard
     mock_case.data_analysis = Workflow.RNAFUSION
@@ -222,7 +235,9 @@ def test_rnafusion_start(
 
     # GIVEN that the sample sheet content is created
     mocker.patch.object(
-        RNAFusionSampleSheetCreator, "_get_sample_sheet_content_per_sample", return_value=[[""]]
+        RNAFusionSampleSheetCreator,
+        "_get_content",
+        return_value=[["this", "is", "a", "header"], ["this", "is", "a", "row"]],
     )
 
     # GIVEN that the fastq files exist
@@ -279,6 +294,7 @@ def test_rnafusion_start(
     "workflow",
     [
         Workflow.BALSAMIC,
+        Workflow.BALSAMIC_UMI,
         Workflow.MICROSALT,
         Workflow.MIP_DNA,
         Workflow.RNAFUSION,
@@ -306,10 +322,12 @@ def test_start(
     mock_configurator.configure.return_value = mock_case_config
 
     # GIVEN a FastqFetcher
-    input_fetcher: TypedMock[FastqFetcher] = create_typed_mock(FastqFetcher)
+    fastq_fetcher: TypedMock[FastqFetcher] = create_typed_mock(FastqFetcher)
 
-    # GIVEN a Store
-    mock_store: Store = create_autospec(Store)
+    # GIVEN a Store with a case with the correct workflow
+    store: Store = create_autospec(Store)
+    case: Case = create_autospec(Case, data_analysis=workflow)
+    store.get_case_by_internal_id_strict = Mock(return_value=case)
 
     # GIVEN that the submitter returns a (session id and tower id) or None when submitting the analysis
     mock_submitter.submit = Mock(return_value=submit_result)
@@ -317,8 +335,8 @@ def test_start(
     # GIVEN an analysis starter initialised with the previously mocked classes
     analysis_starter = AnalysisStarter(
         configurator=mock_configurator,
-        input_fetcher=input_fetcher.as_type,
-        store=mock_store,
+        analysis_input_validator=fastq_fetcher.as_type,
+        store=store,
         submitter=mock_submitter,
         tracker=mock_tracker,
         workflow=workflow,
@@ -329,17 +347,43 @@ def test_start(
 
     # THEN the analysis should be started successfully
     mock_tracker.ensure_analysis_not_ongoing.assert_called_once_with(case_id)
-    input_fetcher.as_mock.ensure_files_are_ready.assert_called_once_with(case_id)
+    fastq_fetcher.as_mock.ensure_files_are_ready.assert_called_once_with(case_id)
     mock_configurator.configure.assert_called_once_with(case_id=case_id, **flags)
     mock_tracker.set_case_as_running.assert_called_once_with(case_id)
     mock_submitter.submit.assert_called_once_with(mock_case_config)
     mock_tracker.track.assert_called_once_with(case_config=submit_result)
 
 
+def test_start_fails_workflow_mismatch():
+    """Test that starting a case with a mismatched workflow raises an error."""
+    # GIVEN a case_id
+    case_id: str = "case_id"
+
+    # GIVEN a Store with a  MIP-DNA case
+    store: Store = create_autospec(Store)
+    case: Case = create_autospec(Case, data_analysis=Workflow.MIP_DNA)
+    store.get_case_by_internal_id_strict = Mock(return_value=case)
+
+    # GIVEN an analysis starter for raredisease
+    analysis_starter = AnalysisStarter(
+        configurator=create_autospec(NextflowConfigurator),
+        analysis_input_validator=create_autospec(FastqFetcher),
+        store=store,
+        submitter=create_autospec(SeqeraPlatformSubmitter),
+        tracker=create_autospec(NextflowTracker),
+        workflow=Workflow.RAREDISEASE,
+    )
+
+    # WHEN starting the case
+    with pytest.raises(CaseWorkflowMismatchError):
+        analysis_starter.start(case_id)
+
+
 @pytest.mark.parametrize(
     "workflow",
     [
         Workflow.BALSAMIC,
+        Workflow.BALSAMIC_UMI,
         Workflow.MICROSALT,
         Workflow.MIP_DNA,
     ],
@@ -358,11 +402,16 @@ def test_start_subprocess_error_raised_in_run_and_track(
     expected_error = CalledProcessError(returncode=1, cmd="submit_command")
     mock_submitter.submit.side_effect = expected_error
 
+    # GIVEN a Store with a case with the correct workflow
+    store: Store = create_autospec(Store)
+    case: Case = create_autospec(Case, data_analysis=workflow)
+    store.get_case_by_internal_id_strict = Mock(return_value=case)
+
     # GIVEN an analysis starter initialised with the previously mocked classes
     analysis_starter = AnalysisStarter(
         configurator=mock_configurator,
-        input_fetcher=create_autospec(FastqFetcher),
-        store=create_autospec(Store),
+        analysis_input_validator=create_autospec(FastqFetcher),
+        store=store,
         submitter=mock_submitter,
         tracker=mock_tracker,
         workflow=workflow,
@@ -389,14 +438,20 @@ def test_start_seqera_related_error_raised_in_run_and_track(error_type: type[Exc
     submitter: SeqeraPlatformSubmitter = create_autospec(SeqeraPlatformSubmitter)
     tracker: TypedMock[NextflowTracker] = create_typed_mock(NextflowTracker)
 
+    # GIVEN a Store with a case with the correct workflow
+    workflow: Workflow = Workflow.RAREDISEASE
+    store: Store = create_autospec(Store)
+    case: Case = create_autospec(Case, data_analysis=workflow)
+    store.get_case_by_internal_id_strict = Mock(return_value=case)
+
     # GIVEN an analysis starter
     analysis_starter = AnalysisStarter(
         configurator=create_autospec(NextflowConfigurator),
-        input_fetcher=create_autospec(FastqFetcher),
-        store=create_autospec(Store),
+        analysis_input_validator=create_autospec(FastqFetcher),
+        store=store,
         submitter=submitter,
         tracker=tracker.as_type,
-        workflow=Workflow.RAREDISEASE,
+        workflow=workflow,
     )
 
     # GIVEN that the submitter raises an error when submitting the analysis job
@@ -414,6 +469,7 @@ def test_start_seqera_related_error_raised_in_run_and_track(error_type: type[Exc
     "workflow",
     [
         Workflow.BALSAMIC,
+        Workflow.BALSAMIC_UMI,
         Workflow.MICROSALT,
         Workflow.MIP_DNA,
         Workflow.RNAFUSION,
@@ -439,11 +495,16 @@ def test_run(
     # GIVEN that the get_config method from the configurator returns the mock case config
     mock_configurator.get_config.return_value = mock_case_config
 
+    # GIVEN a Store with a case with the correct workflow
+    store: Store = create_autospec(Store)
+    case: Case = create_autospec(Case, data_analysis=workflow)
+    store.get_case_by_internal_id_strict = Mock(return_value=case)
+
     # GIVEN an analysis starter initialised with the previously mocked classes
     analysis_starter = AnalysisStarter(
         configurator=mock_configurator,
-        input_fetcher=create_autospec(FastqFetcher),
-        store=create_autospec(Store),
+        analysis_input_validator=create_autospec(FastqFetcher),
+        store=store,
         submitter=mock_submitter,
         tracker=mock_tracker,
         workflow=workflow,

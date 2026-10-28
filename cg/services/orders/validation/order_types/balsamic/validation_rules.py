@@ -1,3 +1,5 @@
+from typing import Callable
+
 from cg.services.orders.validation.rules.case.rules import (
     validate_at_most_two_samples_per_case,
     validate_case_internal_ids_exist,
@@ -5,6 +7,7 @@ from cg.services.orders.validation.rules.case.rules import (
     validate_case_names_not_repeated,
     validate_existing_cases_belong_to_collaboration,
     validate_number_of_normal_samples,
+    validate_samples_in_case_have_same_prep_category,
 )
 from cg.services.orders.validation.rules.case_sample.rules import (
     reset_optional_capture_kits,
@@ -23,6 +26,7 @@ from cg.services.orders.validation.rules.case_sample.rules import (
     validate_sample_names_different_from_case_names,
     validate_sample_names_not_repeated,
     validate_samples_exist,
+    validate_source_comment_required,
     validate_subject_ids_different_from_case_names,
     validate_subject_ids_different_from_sample_names,
     validate_subject_sex_consistency,
@@ -32,18 +36,20 @@ from cg.services.orders.validation.rules.case_sample.rules import (
     validate_well_position_format,
     validate_well_positions_required,
     validate_wells_contain_at_most_one_sample,
+    warn_if_sex_unknown,
 )
 
-BALSAMIC_CASE_RULES: list[callable] = [
+BALSAMIC_CASE_RULES: list[Callable] = [
     validate_at_most_two_samples_per_case,
     validate_case_internal_ids_exist,
     validate_case_names_available,
     validate_case_names_not_repeated,
     validate_existing_cases_belong_to_collaboration,
     validate_number_of_normal_samples,
+    validate_samples_in_case_have_same_prep_category,
 ]
 
-BALSAMIC_CASE_SAMPLE_RULES: list[callable] = [
+BALSAMIC_CASE_SAMPLE_RULES: list[Callable] = [
     reset_optional_capture_kits,
     validate_application_compatibility,
     validate_application_exists,
@@ -61,6 +67,7 @@ BALSAMIC_CASE_SAMPLE_RULES: list[callable] = [
     validate_samples_exist,
     validate_sample_names_different_from_case_names,
     validate_sample_names_not_repeated,
+    validate_source_comment_required,
     validate_subject_sex_consistency,
     validate_subject_ids_different_from_case_names,
     validate_subject_ids_different_from_sample_names,
@@ -69,4 +76,5 @@ BALSAMIC_CASE_SAMPLE_RULES: list[callable] = [
     validate_well_position_format,
     validate_well_positions_required,
     validate_wells_contain_at_most_one_sample,
+    warn_if_sex_unknown,
 ]

@@ -7,12 +7,12 @@ from cg.constants import DataDelivery, Priority, Workflow
 from cg.constants.archiving import PDC_ARCHIVE_LOCATION
 from cg.constants.cli_options import DRY_RUN, FORCE
 from cg.constants.constants import StatusOptions
+from cg.constants.lims import LimsStatus
 from cg.constants.subject import Sex
 from cg.meta.transfer.external_data import ExternalDataAPI
 from cg.models.cg_config import CGConfig
 from cg.store.models import (
     Application,
-    ApplicationVersion,
     Case,
     CaseSample,
     Collaboration,
@@ -156,7 +156,6 @@ def add_user(context: CGConfig, admin: bool, customer_id: str, email: str, name:
 @click.option(
     "-d", "--down-sampled", type=int, help="How many reads is the sample down sampled to?"
 )
-@click.option("-o", "--order", help="Name of the order the sample belongs to")
 @click.option(
     "-s",
     "--sex",
@@ -175,41 +174,50 @@ def add_user(context: CGConfig, admin: bool, customer_id: str, email: str, name:
 @click.option(
     "-t", "--original-ticket", required=True, help="Original ticket this sample is associated to."
 )
+@click.option(
+    "-ls",
+    "--lims-status",
+    required=True,
+    type=EnumChoice(LimsStatus),
+    help="Lab status for the sample",
+)
 @click.argument("customer_id")
 @click.argument("name")
 @click.pass_obj
 def add_sample(
     context: CGConfig,
-    lims_id: str | None,
-    down_sampled: int | None,
-    sex: Sex,
-    order: str | None,
     application_tag: str,
-    priority: Priority,
     customer_id: str,
+    down_sampled: int | None,
+    lims_id: str | None,
+    lims_status: LimsStatus,
     name: str,
     original_ticket: str,
+    priority: Priority,
+    sex: Sex,
 ):
     """Add a sample for CUSTOMER_ID with a NAME (display)."""
     status_db: Store = context.status_db
 
-    customer: Customer = status_db.get_customer_by_internal_id(customer_internal_id=customer_id)
+    customer: Customer | None = status_db.get_customer_by_internal_id(
+        customer_internal_id=customer_id
+    )
     if not customer:
         LOG.error(f"Customer: {customer_id} not found")
         raise click.Abort
-    application: Application = status_db.get_application_by_tag(tag=application_tag)
+    application: Application | None = status_db.get_application_by_tag(tag=application_tag)
     if not application:
         LOG.error(f"Application: {application_tag} not found")
         raise click.Abort
 
     new_record: Sample = status_db.add_sample(
-        name=name,
-        sex=sex,
         downsampled_to=down_sampled,
         internal_id=lims_id,
-        order=order,
-        priority=priority,
+        lims_status=lims_status,
+        name=name,
         original_ticket=original_ticket,
+        priority=priority,
+        sex=sex,
     )
     new_record.application_version = status_db.get_current_application_version_by_tag(
         tag=application_tag
@@ -261,13 +269,15 @@ def add_case(
     """Add a case with the given name and associated with the given customer"""
     status_db: Store = context.status_db
 
-    customer: Customer = status_db.get_customer_by_internal_id(customer_internal_id=customer_id)
+    customer: Customer | None = status_db.get_customer_by_internal_id(
+        customer_internal_id=customer_id
+    )
     if customer is None:
         LOG.error(f"{customer_id}: customer not found")
         raise click.Abort
 
     for panel_abbreviation in panel_abbreviations:
-        panel: Panel = status_db.get_panel_by_abbreviation(abbreviation=panel_abbreviation)
+        panel: Panel | None = status_db.get_panel_by_abbreviation(abbreviation=panel_abbreviation)
 
         if panel is None:
             LOG.error(f"{panel_abbreviation}: panel not found")
@@ -285,17 +295,19 @@ def add_case(
         priority=priority,
         ticket=ticket,
     )
-    order: Order = status_db.get_order_by_ticket_id(int(ticket))
+    order: Order | None = status_db.get_order_by_ticket_id(int(ticket))
     if not order:
         LOG.warning(f"No order found with ticket_id {ticket}")
         click.confirm("No order found for the given ticket, proceed?", default=False, abort=True)
+        order_name: str = click.prompt("What should the new order's name be?")
         order = Order(
             customer_id=customer.id,
+            name=order_name,
             ticket_id=int(ticket),
         )
     new_case.orders.append(order)
 
-    new_case.customer: Customer = customer
+    new_case.customer = customer
     status_db.session.add(new_case)
     status_db.session.commit()
     LOG.info(f"{new_case.internal_id}: new case added")
@@ -305,6 +317,14 @@ def add_case(
 @click.option("-m", "--mother-id", help="Sample ID for mother of sample")
 @click.option("-f", "--father-id", help="Sample ID for father of sample")
 @click.option("-s", "--status", type=EnumChoice(StatusOptions), required=True)
+@click.option(
+    "-d/-nd",
+    "--delivery/--no-delivery",
+    "should_deliver_sample",
+    is_flag=True,
+    required=True,
+    help="Toggle whether case delivery should trigger sample delivery.",
+)
 @click.argument("case-id")
 @click.argument("sample-id")
 @click.pass_obj
@@ -315,6 +335,7 @@ def link_sample_to_case(
     status: str,
     case_id: str,
     sample_id: str,
+    should_deliver_sample: bool,
 ):
     """Create a link between a case id and a sample id."""
     status_db: Store = context.status_db
@@ -351,7 +372,12 @@ def link_sample_to_case(
             raise click.Abort
 
     new_record: CaseSample = status_db.relate_sample(
-        case=case_obj, sample=sample, status=status, mother=mother, father=father
+        case=case_obj,
+        sample=sample,
+        status=status,
+        mother=mother,
+        father=father,
+        should_deliver_sample=should_deliver_sample,
     )
     status_db.session.add(new_record)
     status_db.session.commit()

@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from cg.constants import Workflow
 from cg.constants.observations import BalsamicObservationPanel
 from cg.models.cg_config import (
     BalsamicConfig,
@@ -12,14 +13,14 @@ from cg.models.cg_config import (
     RnafusionConfig,
     SlurmConfig,
     TaxprofilerConfig,
+    TomteConfig,
+    TranaConfig,
 )
 
 
 @pytest.fixture
 def get_nextflow_config_dict(
-    nextflow_binary: Path,
     nextflow_root: str,
-    conda_binary: Path,
     nf_analysis_platform_config_path: Path,
     nf_analysis_pipeline_config_path: Path,
     nf_analysis_pipeline_params_path: Path,
@@ -27,7 +28,7 @@ def get_nextflow_config_dict(
     nextflow_repository: str,
     nextflow_pipeline_revision: str,
     email_address: str,
-) -> callable:
+) -> Callable:
     """
     Return a config dictionary factory for Nextflow pipelines. The returned factory can be called
     by adding the workflow as parameter to obtain the config dictionary.
@@ -36,19 +37,22 @@ def get_nextflow_config_dict(
     """
 
     def _make_dict(workflow: str) -> dict:
-        return {
-            "binary_path": nextflow_binary.as_posix(),
+        nextflow_core_config: dict = {
+            "binary_path": "path/to/bin/nextflow/",
+            "pipeline_deliverables": "path/to/pipeline_deliverables.yaml",
             "compute_env": "nf_tower_compute_env",
-            "conda_binary": conda_binary.as_posix(),
+            "conda_binary": "path/to/bin/conda",
             "conda_env": f"S_{workflow}",
             "platform": str(nf_analysis_platform_config_path),
             "params": str(nf_analysis_pipeline_params_path),
             "config": str(nf_analysis_pipeline_config_path),
+            "reference": "reference.fasta",
             "resources": str(nf_analysis_pipeline_resource_optimisation_path),
-            "launch_directory": Path("path", "to", "launchdir").as_posix(),
-            "workflow_bin_path": Path("workflow", "path").as_posix(),
+            "launch_directory": "path/to/launchdir",
+            "workflow_bin_path": "workflow/path",
+            "pre_run_script": "do something",
             "profile": "myprofile",
-            "references": Path("path", "to", "references").as_posix(),
+            "references": "path/to/references",
             "repository": nextflow_repository,
             "revision": nextflow_pipeline_revision,
             "root": nextflow_root,
@@ -59,6 +63,46 @@ def get_nextflow_config_dict(
             "tower_workflow": workflow,
         }
 
+        if workflow == Workflow.NALLO:
+            nallo_config: dict = {
+                "rank_model_threshold": 42,
+                "rank_model_snv": "path/to/ghxx_nallo_rank_model_snvs.ini",
+                "rank_model_sv": "path/to/ghxx_nallo_rank_model_svs.ini",
+                "variant_catalog": "path/to/variant/catalogue.bed",
+            }
+            nextflow_core_config.update(nallo_config)
+
+        if workflow == Workflow.RAREDISEASE:
+            raredisease_config: dict = {
+                "default_target_bed": "default_target.bed",
+                "gcnvcaller": {
+                    "default_target.bed": {
+                        "gcnvcaller_model": "gcnvcaller_model",
+                        "ploidy_model": "ploidy_model",
+                        "readcount_intervals": "readcount_intervals",
+                    }
+                },
+                "rank_model_threshold": 5,
+                "rank_model_snv": "path/to/ghxx_rd_rank_model_snvs.ini",
+                "rank_model_sv": "path/to/ghxx_rd_rank_model_svs.ini",
+                "references_directory": "path/to/references_dir",
+                "variant_catalog": "path/to/variant/catalogue.json",
+                "verifybamid_svd": {
+                    "wes": {
+                        "bed": "path/to/verifybamid/wes/bed",
+                        "mu": "path/to/verifybamid/wes/mu",
+                        "ud": "path/to/verifybamid/wes/ud",
+                    },
+                    "wgs": {
+                        "bed": "path/to/verifybamid/wgs/bed",
+                        "mu": "path/to/verifybamid/wgs/mu",
+                        "ud": "path/to/verifybamid/wgs/ud",
+                    },
+                },
+            }
+            nextflow_core_config.update(raredisease_config)
+        return nextflow_core_config
+
     return _make_dict
 
 
@@ -68,9 +112,12 @@ def cg_balsamic_config(tmp_path) -> BalsamicConfig:
         balsamic_cache=tmp_path / "balsamic_cache",
         bed_path=tmp_path / "beds",
         binary_path=tmp_path / "binary",
+        cache_version="0.0.0.1337",
         cadd_path=tmp_path / "cadd",
+        cancer_genelist=tmp_path / "genelist.tsv",
         conda_binary=tmp_path / "conda",
         conda_env="balsamic_env",
+        cosmic_path=tmp_path / "path_to_the_stars_coding_muts_v97.vcf.gz",
         genome_interval_path=tmp_path / "intervals.interval_list",
         gens_coverage_female_path=tmp_path / "coverage_female.txt",
         gens_coverage_male_path=tmp_path / "coverage_male.txt",
@@ -107,28 +154,56 @@ def cg_balsamic_config(tmp_path) -> BalsamicConfig:
         swegen_path="swegen",
         swegen_snv=tmp_path / "swegen_snv.vcf",
         swegen_sv=tmp_path / "swegen_sv.vcf",
+        workflow_profile=tmp_path / "workflow_profile_dir",
     )
 
 
 @pytest.fixture
 def nallo_config_object(get_nextflow_config_dict: Callable) -> NalloConfig:
-    config: dict = get_nextflow_config_dict(workflow="nallo")
+    config: dict = get_nextflow_config_dict(workflow=Workflow.NALLO)
     return NalloConfig(**config)
 
 
 @pytest.fixture
 def raredisease_config_object(get_nextflow_config_dict: Callable) -> RarediseaseConfig:
-    config: dict = get_nextflow_config_dict(workflow="raredisease")
+    config: dict = get_nextflow_config_dict(workflow=Workflow.RAREDISEASE)
+    config["default_target_bed"] = "twistexomecomprehensive_10.2_hg38_design.bed"
+    config["gcnvcaller"] = {
+        "twistexomecomprehensive_10.2_hg38_design.bed": {
+            "gcnvcaller_model": "tyra/bananks",
+            "ploidy_model": "tom/bananks",
+            "readcount_intervals": "richard/banankins",
+        }
+    }
+    config["references_directory"] = Path("/raredisease/references")
+    config["verifybamid_svd"] = {
+        "wes": {
+            "bed": Path("path", "to", "sleeping_quarters.bed"),
+            "mu": Path("path", "to", "cow.mu"),
+            "ud": Path("path", "to", "department_of_external_affairs.UD"),
+        },
+        "wgs": {
+            "bed": Path("path", "to", "sleeping_quarters.bed"),
+            "mu": Path("path", "to", "cow.mu"),
+            "ud": Path("path", "to", "department_of_external_affairs.UD"),
+        },
+    }
     return RarediseaseConfig(**config)
 
 
 @pytest.fixture
 def rnafusion_config_object(get_nextflow_config_dict: Callable) -> RnafusionConfig:
-    config: dict = get_nextflow_config_dict(workflow="rnafusion")
+    config: dict = get_nextflow_config_dict(workflow=Workflow.RNAFUSION)
     return RnafusionConfig(**config)
 
 
 @pytest.fixture
 def taxprofiler_config_object(get_nextflow_config_dict: Callable) -> TaxprofilerConfig:
-    config: dict = get_nextflow_config_dict(workflow="taxprofiler")
+    config: dict = get_nextflow_config_dict(workflow=Workflow.TAXPROFILER)
     return TaxprofilerConfig(**config)
+
+
+@pytest.fixture
+def tomte_config_object(get_nextflow_config_dict: Callable) -> TomteConfig:
+    config: dict = get_nextflow_config_dict(workflow=Workflow.TOMTE)
+    return TomteConfig(**config)

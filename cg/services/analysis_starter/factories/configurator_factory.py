@@ -1,17 +1,19 @@
 from pathlib import Path
+from typing import cast
 
 from cg.apps.housekeeper.hk import HousekeeperAPI
 from cg.apps.lims import LimsAPI
 from cg.apps.scout.scoutapi import ScoutAPI
 from cg.constants import Workflow
 from cg.meta.workflow.fastq import BalsamicFastqHandler, MicrosaltFastqHandler, MipFastqHandler
-from cg.models.cg_config import CGConfig, CommonAppConfig
+from cg.models.cg_config import CGConfig, CommonAppConfig, RarediseaseConfig
 from cg.services.analysis_starter.configurator.configurator import Configurator
 from cg.services.analysis_starter.configurator.extensions.nallo import NalloExtension
 from cg.services.analysis_starter.configurator.extensions.pipeline_extension import (
     PipelineExtension,
 )
 from cg.services.analysis_starter.configurator.extensions.raredisease import RarediseaseExtension
+from cg.services.analysis_starter.configurator.extensions.tomte_extension import TomteExtension
 from cg.services.analysis_starter.configurator.file_creators.balsamic_config import (
     BalsamicConfigFileCreator,
 )
@@ -34,7 +36,7 @@ from cg.services.analysis_starter.configurator.file_creators.nextflow.params_fil
 from cg.services.analysis_starter.configurator.file_creators.nextflow.params_file.nallo import (
     NalloParamsFileCreator,
 )
-from cg.services.analysis_starter.configurator.file_creators.nextflow.params_file.raredisease import (
+from cg.services.analysis_starter.configurator.file_creators.nextflow.params_file.raredisease_params_file_creator import (
     RarediseaseParamsFileCreator,
 )
 from cg.services.analysis_starter.configurator.file_creators.nextflow.params_file.rnafusion import (
@@ -43,22 +45,36 @@ from cg.services.analysis_starter.configurator.file_creators.nextflow.params_fil
 from cg.services.analysis_starter.configurator.file_creators.nextflow.params_file.taxprofiler import (
     TaxprofilerParamsFileCreator,
 )
-from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.nallo import (
+from cg.services.analysis_starter.configurator.file_creators.nextflow.params_file.tomte_params_file_creator import (
+    TomteParamsFileCreator,
+)
+from cg.services.analysis_starter.configurator.file_creators.nextflow.params_file.trana_params_file_creator import (
+    TranaParamsFileCreator,
+)
+from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.nallo_sample_sheet_creator import (
     NalloSampleSheetCreator,
 )
 from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.protocol import (
     SampleSheetCreator,
 )
-from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.raredisease import (
+from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.raredisease_sample_sheet_creator import (
     RarediseaseSampleSheetCreator,
 )
-from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.rnafusion import (
+from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.rnafusion_sample_sheet_creator import (
     RNAFusionSampleSheetCreator,
 )
-from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.taxprofiler import (
+from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.taxprofiler_sample_sheet_creator import (
     TaxprofilerSampleSheetCreator,
 )
-from cg.services.analysis_starter.configurator.implementations.balsamic import BalsamicConfigurator
+from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.tomte_sample_sheet_creator import (
+    TomteSampleSheetCreator,
+)
+from cg.services.analysis_starter.configurator.file_creators.nextflow.sample_sheet.trana_sample_sheet_creator import (
+    TranaSampleSheetCreator,
+)
+from cg.services.analysis_starter.configurator.implementations.balsamic_configurator import (
+    BalsamicConfigurator,
+)
 from cg.services.analysis_starter.configurator.implementations.microsalt import (
     MicrosaltConfigurator,
 )
@@ -68,7 +84,6 @@ from cg.store.store import Store
 
 
 class ConfiguratorFactory:
-
     def __init__(self, cg_config: CGConfig):
         self.cg_config = cg_config
         self.housekeeper_api: HousekeeperAPI = cg_config.housekeeper_api
@@ -83,29 +98,41 @@ class ConfiguratorFactory:
                 return self._get_microsalt_configurator()
             case Workflow.MIP_DNA:
                 return self._get_mip_dna_configurator()
-            case Workflow.NALLO | Workflow.RAREDISEASE | Workflow.RNAFUSION | Workflow.TAXPROFILER:
+            case (
+                Workflow.NALLO
+                | Workflow.RAREDISEASE
+                | Workflow.RNAFUSION
+                | Workflow.TAXPROFILER
+                | Workflow.TOMTE
+                | Workflow.TRANA_16S
+                | Workflow.TRANA_ITS
+            ):
                 return self._get_nextflow_configurator(workflow)
             case _:
                 raise NotImplementedError
 
     def _get_nextflow_configurator(self, workflow: Workflow) -> NextflowConfigurator:
+        pipeline_config = cast(CommonAppConfig, self.cg_config.get_pipeline_config(workflow))
         config_file_creator: NextflowConfigFileCreator = self._get_nextflow_config_file_creator(
-            workflow
+            pipeline_config
         )
-        params_file_creator: ParamsFileCreator = self._get_params_file_creator(workflow)
+        params_file_creator: ParamsFileCreator = self._get_params_file_creator(
+            workflow=workflow, pipeline_config=pipeline_config
+        )
         sample_sheet_creator: SampleSheetCreator = self._get_sample_sheet_creator(workflow)
         extension: PipelineExtension = self._get_pipeline_extension(workflow)
         return NextflowConfigurator(
             config_file_creator=config_file_creator,
             params_file_creator=params_file_creator,
-            pipeline_config=self._get_pipeline_config(workflow),
+            pipeline_config=pipeline_config,
             sample_sheet_creator=sample_sheet_creator,
             store=self.store,
             pipeline_extension=extension,
         )
 
-    def _get_nextflow_config_file_creator(self, workflow: Workflow) -> NextflowConfigFileCreator:
-        pipeline_config: CommonAppConfig = self._get_pipeline_config(workflow)
+    def _get_nextflow_config_file_creator(
+        self, pipeline_config: CommonAppConfig
+    ) -> NextflowConfigFileCreator:
         return NextflowConfigFileCreator(
             account=pipeline_config.slurm.account,
             platform=pipeline_config.platform,
@@ -114,24 +141,40 @@ class ConfiguratorFactory:
             workflow_config_path=pipeline_config.config,
         )
 
-    def _get_params_file_creator(self, workflow: Workflow) -> ParamsFileCreator:
-        params: str = self._get_pipeline_config(workflow).params
+    def _get_params_file_creator(
+        self, workflow: Workflow, pipeline_config: CommonAppConfig
+    ) -> ParamsFileCreator:
+        params = getattr(pipeline_config, "params", None)
+        if not params:
+            raise NotImplementedError(
+                f"No params in pipeline config {pipeline_config.model_dump()}"
+            )
         match workflow:
             case Workflow.NALLO:
                 return NalloParamsFileCreator(params)
             case Workflow.RAREDISEASE:
+                raredisease_config = cast(RarediseaseConfig, self.cg_config.raredisease)
                 return RarediseaseParamsFileCreator(
-                    lims=self.lims_api, store=self.store, params=params
+                    default_target_bed=raredisease_config.default_target_bed,
+                    gcnvcaller_files=raredisease_config.gcnvcaller,
+                    verifybamid_files_set=raredisease_config.verifybamid_svd,
+                    lims=self.lims_api,
+                    params=raredisease_config.params,
+                    references_directory=raredisease_config.references_directory,
+                    store=self.store,
                 )
             case Workflow.RNAFUSION:
                 return RNAFusionParamsFileCreator(params)
             case Workflow.TAXPROFILER:
                 return TaxprofilerParamsFileCreator(params)
+            case Workflow.TOMTE:
+                return TomteParamsFileCreator(
+                    lims_api=self.lims_api, params=params, status_db=self.store
+                )
+            case Workflow.TRANA_16S | Workflow.TRANA_ITS:
+                return TranaParamsFileCreator(params)
             case _:
                 raise NotImplementedError(f"There is no params file creator for {workflow}")
-
-    def _get_pipeline_config(self, workflow: Workflow) -> CommonAppConfig:
-        return getattr(self.cg_config, workflow)
 
     def _get_sample_sheet_creator(self, workflow: Workflow) -> SampleSheetCreator:
         match workflow:
@@ -152,6 +195,14 @@ class ConfiguratorFactory:
                 return TaxprofilerSampleSheetCreator(
                     housekeeper_api=self.housekeeper_api, store=self.store
                 )
+            case Workflow.TOMTE:
+                return TomteSampleSheetCreator(
+                    housekeeper_api=self.housekeeper_api, store=self.store
+                )
+            case Workflow.TRANA_16S | Workflow.TRANA_ITS:
+                return TranaSampleSheetCreator(
+                    housekeeper_api=self.housekeeper_api, store=self.store
+                )
             case _:
                 raise NotImplementedError(f"No sample sheet creator implemented for {workflow}")
 
@@ -161,7 +212,10 @@ class ConfiguratorFactory:
                 gene_panel_creator: GenePanelFileCreator = self._get_gene_panel_file_creator(
                     workflow
                 )
-                return NalloExtension(gene_panel_file_creator=gene_panel_creator)
+                return NalloExtension(
+                    gene_panel_file_creator=gene_panel_creator,
+                    nallo_config=self.cg_config.nallo,  # type: ignore
+                )
             case Workflow.RAREDISEASE:
                 gene_panel_creator: GenePanelFileCreator = self._get_gene_panel_file_creator(
                     workflow
@@ -172,7 +226,13 @@ class ConfiguratorFactory:
                 return RarediseaseExtension(
                     gene_panel_file_creator=gene_panel_creator,
                     managed_variants_file_creator=managed_variants_creator,
+                    raredisease_config=self.cg_config.raredisease,  # type: ignore
                 )
+            case Workflow.TOMTE:
+                gene_panel_creator: GenePanelFileCreator = self._get_gene_panel_file_creator(
+                    workflow
+                )
+                return TomteExtension(gene_panel_file_creator=gene_panel_creator)
             case _:
                 return PipelineExtension()
 
@@ -185,7 +245,7 @@ class ConfiguratorFactory:
     def _get_scout_api(self, workflow: Workflow) -> ScoutAPI:
         return (
             self.cg_config.scout_api_38
-            if workflow == Workflow.NALLO
+            if workflow in [Workflow.NALLO, Workflow.RAREDISEASE]
             else self.cg_config.scout_api_37
         )
 
@@ -202,6 +262,7 @@ class ConfiguratorFactory:
                 status_db=self.store,
             ),
             config=self.cg_config.balsamic,
+            lims_api=self.lims_api,
             store=self.store,
         )
 

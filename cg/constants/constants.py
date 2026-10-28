@@ -47,13 +47,19 @@ class CaseActions(StrEnum):
         return list(map(lambda action: action.value, cls))
 
 
+CASE_ACTIVE_ACTIONS = [
+    CaseActions.ANALYZE,
+    CaseActions.RUNNING,
+    CaseActions.TOP_UP,
+]
+
 CONTAINER_OPTIONS = ("Tube", "96 well plate", "No container")
 
 
 class ControlOptions(StrEnum):
-    NEGATIVE: str = "negative"
-    POSITIVE: str = "positive"
-    EMPTY: str = ""
+    NEGATIVE = "negative"
+    POSITIVE = "positive"
+    EMPTY = ""
 
 
 DEFAULT_CAPTURE_KIT = "twistexomecomprehensive_10.2_hg19_design.bed"
@@ -100,9 +106,9 @@ class CancerAnalysisType(StrEnum):
 
 
 class SexOptions(StrEnum):
-    MALE: str = "male"
-    FEMALE: str = "female"
-    UNKNOWN: str = "unknown"
+    MALE = "male"
+    FEMALE = "female"
+    UNKNOWN = "unknown"
 
 
 SARS_COV_REGEX = "^[0-9]{2}CS[0-9]{6}$"
@@ -135,12 +141,13 @@ class Workflow(StrEnum):
     SPRING = "spring"
     TAXPROFILER = "taxprofiler"
     TOMTE = "tomte"
+    TRANA_16S = "trana-16s"
+    TRANA_ITS = "trana-its"
 
 
-DNA_WORKFLOWS_WITH_SCOUT_UPLOAD: list[Workflow] = [
-    Workflow.MIP_DNA,
-    Workflow.BALSAMIC,
-    Workflow.BALSAMIC_UMI,
+DNA_WORKFLOWS_WITH_RNA_UPLOAD: list[Workflow] = [
+    Workflow.RAREDISEASE,
+    Workflow.NALLO,
 ]
 
 
@@ -155,13 +162,32 @@ class FileFormat(StrEnum):
     YAML: str = "yaml"
 
 
+class GenomeBuild(StrEnum):
+    hg19 = "37"
+    hg38 = "38"
+
+
+WORKFLOW_TO_GENOME_VERSION_MAP: dict[Workflow, GenomeBuild] = {
+    Workflow.BALSAMIC: GenomeBuild.hg19,
+    Workflow.BALSAMIC_UMI: GenomeBuild.hg19,
+    Workflow.MIP_DNA: GenomeBuild.hg19,
+    Workflow.RAREDISEASE: GenomeBuild.hg38,
+    Workflow.NALLO: GenomeBuild.hg38,
+}
+
+
 class GenomeVersion(StrEnum):
     GRCh37 = "GRCh37"
     GRCh38 = "GRCh38"
     T2T_CHM13 = "T2T-CHM13v2.0"
-    CANFAM3 = auto()
     HG19 = "hg19"
     HG38 = "hg38"
+
+
+class BedVersionGenomeVersion(StrEnum):
+    HG19 = "hg19"
+    HG38 = "hg38"
+    CFAM3 = "cfam3"
 
 
 class SampleType(StrEnum):
@@ -187,14 +213,22 @@ class DataDelivery(StrEnum):
     SCOUT = "scout"
     STATINA = "statina"
 
+    @property
+    def excludes_customer_inbox_delivery(self) -> bool:
+        return self in {
+            DataDelivery.NIPT_VIEWER,
+            DataDelivery.NO_DELIVERY,
+            DataDelivery.SCOUT,
+            DataDelivery.STATINA,
+        }
+
 
 class HastaSlurmPartitions(StrEnum):
-    DRAGEN: str = "dragen"
+    DRAGEN = "dragen"
 
 
 class FileExtensions(StrEnum):
     BAM: str = ".bam"
-    BCF: str = ".bcf"
     BED: str = ".bed"
     COMPLETE: str = ".complete"
     CONFIG: str = ".config"
@@ -218,11 +252,9 @@ class FileExtensions(StrEnum):
     SPRING: str = ".spring"
     SH: str = ".sh"
     TAR: str = ".tar"
-    TMP: str = ".tmp"
     TSV: str = ".tsv"
     TXT: str = ".txt"
     VCF: str = ".vcf"
-    VCF_GZ: str = ".vcf.gz"
     XLSX: str = ".xlsx"
     XML: str = ".xml"
     YAML: str = ".yaml"

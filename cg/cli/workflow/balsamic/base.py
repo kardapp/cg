@@ -1,6 +1,7 @@
 """CLI support to create config and/or start BALSAMIC."""
 
 import logging
+from pathlib import Path
 from typing import cast
 
 import rich_click as click
@@ -18,7 +19,9 @@ from cg.meta.workflow.analysis import AnalysisAPI
 from cg.meta.workflow.balsamic import BalsamicAnalysisAPI
 from cg.models.cg_config import CGConfig
 from cg.services.analysis_starter.analysis_starter import AnalysisStarter
-from cg.services.analysis_starter.configurator.implementations.balsamic import BalsamicConfigurator
+from cg.services.analysis_starter.configurator.implementations.balsamic_configurator import (
+    BalsamicConfigurator,
+)
 from cg.services.analysis_starter.factories.configurator_factory import ConfiguratorFactory
 from cg.services.analysis_starter.factories.starter_factory import AnalysisStarterFactory
 from cg.store.store import Store
@@ -140,7 +143,12 @@ def store_available(context: click.Context, dry_run: bool) -> None:
 @ARGUMENT_CASE_ID
 @click.pass_obj
 def config_case(cg_config: CGConfig, case_id: str, panel_bed: str | None):
-    """Configure a Balsamic case so that it is ready to be run."""
+    """Configure a Balsamic case so that it is ready to be run.
+
+    \b
+    Creates the case config file:
+        - CASE_ID.json
+    """
     factory = ConfiguratorFactory(cg_config)
     configurator = cast(BalsamicConfigurator, factory.get_configurator(Workflow.BALSAMIC))
     configurator.configure(case_id=case_id, panel_bed=panel_bed)
@@ -150,8 +158,14 @@ def config_case(cg_config: CGConfig, case_id: str, panel_bed: str | None):
 @OPTION_WORKFLOW_PROFILE
 @ARGUMENT_CASE_ID
 @click.pass_obj
-def run(cg_config: CGConfig, case_id: str, workflow_profile: click.Path | None):
-    """Run a preconfigured Balsamic case."""
+def run(cg_config: CGConfig, case_id: str, workflow_profile: Path | None):
+    """
+    Run a preconfigured Balsamic case.
+
+    \b
+    Assumes that case config file exist in the case run directory:
+        - CASE_ID.json
+    """
     factory = AnalysisStarterFactory(cg_config)
     analysis_starter: AnalysisStarter = factory.get_analysis_starter_for_workflow(Workflow.BALSAMIC)
     analysis_starter.run(case_id=case_id, workflow_profile=workflow_profile)
@@ -166,9 +180,16 @@ def start(
     cg_config: CGConfig,
     case_id: str,
     panel_bed: str | None,
-    workflow_profile: click.Path | None,
+    workflow_profile: Path | None,
 ):
-    """Start a Balsamic case. Configures the case if needed."""
+    """
+    Starts a Balsamic cases.
+
+    \b
+    Configures the case and creates the case config file:
+        - CASE_ID.json
+    and submits the job to slurm.
+    """
     factory = AnalysisStarterFactory(cg_config)
     analysis_starter: AnalysisStarter = factory.get_analysis_starter_for_workflow(Workflow.BALSAMIC)
     analysis_starter.start(case_id=case_id, workflow_profile=workflow_profile, panel_bed=panel_bed)
@@ -177,7 +198,14 @@ def start(
 @balsamic.command("start-available")
 @click.pass_obj
 def start_available(cg_config: CGConfig):
-    """Starts all available raredisease cases."""
+    """
+    Starts all available Balsamic cases.
+
+    \b
+    Configures the individual case and creates its case config file:
+        - CASE_ID.json
+    and submits the job to slurm.
+    """
     LOG.info("Starting Balsamic workflow for all available cases.")
     factory = AnalysisStarterFactory(cg_config)
     analysis_starter = factory.get_analysis_starter_for_workflow(Workflow.BALSAMIC)

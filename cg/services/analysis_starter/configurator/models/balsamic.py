@@ -16,15 +16,19 @@ class BalsamicConfigInput(BaseModel):
     artefact_snv_observations: Path
     balsamic_binary: Path
     balsamic_cache: Path
+    cache_version: str
     cadd_annotations: Path
+    cancer_genelist: Path | None = None
     cancer_germline_snv_observations: Path
     cancer_somatic_snv_observations: Path
     cancer_somatic_sv_observations: Path
     case_id: str
+    case_name: str
     clinical_snv_observations: Path
     clinical_sv_observations: Path
     conda_binary: Path
     conda_env: str
+    cosmic_path: Path
     fastq_path: Path
     gender: SexOptions
     genome_version: GenomeVersion
@@ -71,7 +75,9 @@ class BalsamicConfigInputPanel(BalsamicConfigInput):
             "--analysis-workflow": self.analysis_workflow,
             "--artefact-snv-observations": self.artefact_snv_observations,
             "--balsamic-cache": self.balsamic_cache,
+            "--cache-version": self.cache_version,
             "--cadd-annotations": self.cadd_annotations,
+            "--cancer-genelist": self.cancer_genelist,
             "--cancer-germline-snv-observations": self.cancer_germline_snv_observations,
             "--cancer-somatic-snv-observations": self.cancer_somatic_snv_observations,
             "--cancer-somatic-snv-panel-observations": self.cancer_somatic_snv_panel_observations,
@@ -79,6 +85,8 @@ class BalsamicConfigInputPanel(BalsamicConfigInput):
             "--case-id": self.case_id,
             "--clinical-snv-observations": self.clinical_snv_observations,
             "--clinical-sv-observations": self.clinical_sv_observations,
+            "--cosmic": self.cosmic_path,
+            "--cust-case-id": self.case_name,
             "--fastq-path": self.fastq_path,
             "--gender": self.gender,
             "--genome-version": self.genome_version,
@@ -108,6 +116,7 @@ class BalsamicConfigInputWGS(BalsamicConfigInput):
             "--artefact-snv-observations": self.artefact_snv_observations,
             "--artefact-sv-observations": self.artefact_sv_observations,
             "--balsamic-cache": self.balsamic_cache,
+            "--cache-version": self.cache_version,
             "--cadd-annotations": self.cadd_annotations,
             "--cancer-germline-snv-observations": self.cancer_germline_snv_observations,
             "--cancer-somatic-snv-observations": self.cancer_somatic_snv_observations,
@@ -115,6 +124,8 @@ class BalsamicConfigInputWGS(BalsamicConfigInput):
             "--case-id": self.case_id,
             "--clinical-snv-observations": self.clinical_snv_observations,
             "--clinical-sv-observations": self.clinical_sv_observations,
+            "--cosmic": self.cosmic_path,
+            "--cust-case-id": self.case_name,
             "--fastq-path": self.fastq_path,
             "--gender": self.gender,
             "--genome-interval": self.genome_interval,
@@ -138,15 +149,13 @@ class BalsamicCaseConfig(CaseConfig):
     head_job_partition: str
     qos: SlurmQos
     sample_config: Path
-    workflow: Workflow = Workflow.BALSAMIC
-    workflow_profile: Path | None = None
+    workflow: Workflow
+    workflow_profile: Path
 
     def get_start_command(self) -> str:
         command = (
             "{conda_binary} run --name {environment} {binary} run analysis --account {account} "
             "--qos {qos} --sample-config {sample_config} --headjob-partition {head_job_partition} "
-            "--run-analysis".format(**self.model_dump())
+            "--run-analysis --workflow-profile {workflow_profile}".format(**self.model_dump())
         )
-        if self.workflow_profile:
-            command += f" --workflow-profile {self.workflow_profile}"
         return command

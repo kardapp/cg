@@ -12,7 +12,7 @@ from cg.constants.constants import SequencingQCStatus
 from cg.constants.devices import DeviceType
 from cg.constants.pedigree import Pedigree
 from cg.constants.priority import PriorityTerms
-from cg.constants.sequencing import Sequencers
+from cg.constants.sequencing import ReadType, Sequencers
 from cg.constants.subject import PhenotypeStatus, Sex
 from cg.models.run_devices.illumina_run_directory_data import IlluminaRunDirectoryData
 from cg.services.illumina.data_transfer.models import (
@@ -40,6 +40,7 @@ from cg.store.models import (
     OrderTypeApplication,
     Organism,
     PacbioSequencingRun,
+    PacbioSMRTCellMetrics,
     Panel,
     Pool,
     RunDevice,
@@ -53,6 +54,20 @@ LOG = logging.getLogger(__name__)
 
 class StoreHelpers:
     """Class to hold helper functions that needs to be used all over."""
+
+    @staticmethod
+    def add_bed(name: str) -> Bed:
+        """Build a new bed record."""
+        return Bed(name=name)
+
+    @staticmethod
+    def add_bed_version(bed: Bed, version: int, filename: str, shortname: str) -> BedVersion:
+        """Build a new bed version record."""
+        bed_version: BedVersion = BedVersion(
+            version=version, filename=filename, shortname=shortname, genome_version="hg19"
+        )
+        bed_version.bed = bed
+        return bed_version
 
     @staticmethod
     def ensure_hk_bundle(store: HousekeeperAPI, bundle_data: dict, include: bool = False) -> Bundle:
@@ -132,6 +147,7 @@ class StoreHelpers:
         is_accredited: bool = False,
         version: int = 1,
         valid_from: datetime = datetime.now(),
+        read_type: str = ReadType.SHORT_READ,
         **kwargs,
     ) -> ApplicationVersion:
         """Utility function to return existing or create application version for tests."""
@@ -149,6 +165,7 @@ class StoreHelpers:
                 description=description,
                 is_accredited=is_accredited,
                 sequencing_depth=sequencing_depth,
+                read_type=read_type,
                 **kwargs,
             )
 
@@ -201,6 +218,7 @@ class StoreHelpers:
         prep_category: str = "wgs",
         description: str = "dummy_description",
         is_archived: bool = False,
+        read_type: str = ReadType.SHORT_READ,
         **kwargs,
     ) -> Application:
         """Ensure that application exists in store."""
@@ -212,6 +230,7 @@ class StoreHelpers:
                 prep_category=prep_category,
                 description=description,
                 is_archived=is_archived,
+                read_type=read_type,
                 **kwargs,
             )
         return application
@@ -228,6 +247,7 @@ class StoreHelpers:
         is_accredited: bool = False,
         is_external: bool = False,
         min_sequencing_depth: int = 30,
+        read_type: str = ReadType.SHORT_READ,
         **kwargs,
     ) -> Application:
         """Utility function to add a application to a store."""
@@ -249,6 +269,7 @@ class StoreHelpers:
             limitations="A limitation",
             is_external=is_external,
             min_sequencing_depth=min_sequencing_depth,
+            read_type=read_type,
             **kwargs,
         )
         store.session.add(application)
@@ -290,15 +311,15 @@ class StoreHelpers:
         store.session.commit()
         return application_limitation
 
-    @staticmethod
-    def ensure_bed_version(store: Store, bed_name: str = "dummy_bed") -> BedVersion:
+    @classmethod
+    def ensure_bed_version(cls, store: Store, bed_name: str = "dummy_bed") -> BedVersion:
         """Return existing or create and return bed version for tests."""
         bed: Bed | None = store.get_bed_by_name(bed_name)
         if not bed:
-            bed: Bed = store.add_bed(name=bed_name)
+            bed: Bed = cls.add_bed(name=bed_name)
             store.session.add(bed)
 
-        bed_version: BedVersion = store.add_bed_version(
+        bed_version: BedVersion = cls.add_bed_version(
             bed=bed, version=1, filename="dummy_filename", shortname=bed_name
         )
         store.session.add(bed_version)
@@ -354,6 +375,7 @@ class StoreHelpers:
         uploading: bool = False,
         config_path: str = None,
         housekeeper_version_id: int | None = None,
+        trailblazer_id: int | None = None,
     ) -> Analysis:
         """Utility function to add an analysis for tests."""
 
@@ -383,6 +405,8 @@ class StoreHelpers:
             analysis.workflow = str(workflow)
         if housekeeper_version_id:
             analysis.housekeeper_version_id = housekeeper_version_id
+        if trailblazer_id:
+            analysis.trailblazer_id = trailblazer_id
 
         analysis.limitations = "A limitation"
         analysis.case = case
@@ -436,7 +460,6 @@ class StoreHelpers:
             internal_id=internal_id,
             subject_id=subject_id,
         )
-
         sample.application_version_id = application_version_id
         sample.customer = customer
         sample.ordered_at = datetime.now()
@@ -528,11 +551,10 @@ class StoreHelpers:
         customer_id: int,
         ticket_id: int,
         order_date: datetime = datetime(year=2023, month=12, day=24),
+        name: str = "order_name",
     ) -> Order:
         order = Order(
-            customer_id=customer_id,
-            ticket_id=ticket_id,
-            order_date=order_date,
+            customer_id=customer_id, ticket_id=ticket_id, order_date=order_date, name=name
         )
         store.session.add(order)
         store.session.commit()
@@ -584,8 +606,7 @@ class StoreHelpers:
         """Load a case with samples and link relations from a dictionary."""
         customer_obj = StoreHelpers.ensure_customer(store)
         order = store.get_order_by_ticket_id(ticket_id=int(case_info["tickets"])) or Order(
-            ticket_id=int(case_info["tickets"]),
-            customer_id=customer_obj.id,
+            ticket_id=int(case_info["tickets"]), customer_id=customer_obj.id, name="order_name"
         )
         case = Case(
             name=case_info["name"],
@@ -877,13 +898,19 @@ class StoreHelpers:
         store: Store,
         sample: Sample,
         case: Case,
+        should_deliver_sample: bool = True,
         status: str = PhenotypeStatus.UNKNOWN,
         father: Sample = None,
         mother: Sample = None,
     ) -> CaseSample:
         """Utility function to link a sample to a case."""
         link = store.relate_sample(
-            sample=sample, case=case, status=status, father=father, mother=mother
+            sample=sample,
+            case=case,
+            status=status,
+            father=father,
+            mother=mother,
+            should_deliver_sample=should_deliver_sample,
         )
         store.session.add(link)
         store.session.commit()
@@ -946,12 +973,21 @@ class StoreHelpers:
         return sample_obj
 
     @classmethod
-    def relate_samples(cls, base_store: Store, case: Case, samples: list[Sample]):
+    def relate_samples(
+        cls,
+        base_store: Store,
+        case: Case,
+        samples: list[Sample],
+        should_deliver_sample: bool = True,
+    ):
         """Utility function to relate many samples to one case."""
 
         for sample in samples:
             link = base_store.relate_sample(
-                case=case, sample=sample, status=PhenotypeStatus.UNKNOWN
+                case=case,
+                sample=sample,
+                status=PhenotypeStatus.UNKNOWN,
+                should_deliver_sample=should_deliver_sample,
             )
             base_store.session.add(link)
             base_store.session.commit()
@@ -993,7 +1029,6 @@ class StoreHelpers:
         store: Store,
         customer_id: str = "cust000",
         name: str = "test_pool",
-        order: str = "test_order",
         application_tag: str = "dummy_tag",
         application_type: str = "tgs",
         is_external: bool = False,
@@ -1002,10 +1037,13 @@ class StoreHelpers:
         received_at: datetime = None,
         no_invoice: bool = None,
         invoice_id: int = None,
+        ticket: int = 123456,
     ) -> Pool:
         """Utility function to add a pool that can be used in tests."""
         customer_id = customer_id or "cust000"
-        customer: Customer = store.get_customer_by_internal_id(customer_internal_id=customer_id)
+        customer: Customer | None = store.get_customer_by_internal_id(
+            customer_internal_id=customer_id
+        )
         if not customer:
             customer = StoreHelpers.ensure_customer(store, customer_id=customer_id)
 
@@ -1016,20 +1054,23 @@ class StoreHelpers:
             is_external=is_external,
             is_rna=is_rna,
         )
+        order: Order | None = store.get_order_by_ticket_id(ticket)
+        if ticket and not order:
+            order = store.add_order(customer=customer, name="order_name", ticket_id=ticket)
 
         pool = store.add_pool(
             name=name,
             ordered=datetime.now(),
             application_version=application_version,
             customer=customer,
-            order=order,
             delivered_at=delivered_at,
             received_at=received_at,
             no_invoice=no_invoice,
             invoice_id=invoice_id,
+            order=order,
         )
-        store.session.add(pool)
-        store.session.commit()
+        store.add_item_to_store(pool)
+        store.commit_to_store()
         return pool
 
     @classmethod
@@ -1133,49 +1174,49 @@ class StoreHelpers:
         return device
 
     @staticmethod
-    def add_pacbio_sequencing_run(
+    def add_pacbio_smrt_cell_metrics(
         store: Store,
         id: int,
         device_id: int,
-        run_name: str = "run_name",
-    ) -> PacbioSequencingRun:
-        run = PacbioSequencingRun(
-            barcoded_hifi_reads=123456700,
-            barcoded_hifi_yield=12345600,
-            barcoded_hifi_reads_percentage=99.9,
+        sequencing_run: PacbioSequencingRun,
+    ) -> PacbioSMRTCellMetrics:
+        run = PacbioSMRTCellMetrics(
             barcoded_hifi_mean_read_length=14789,
-            id=id,
-            well="A01",
-            plate=1,
-            run_name=run_name,
-            movie_name="movie_name",
-            started_at=datetime.now(),
-            hifi_reads=123456789,
-            hifi_yield=12345678,
+            barcoded_hifi_reads=123456700,
+            barcoded_hifi_reads_percentage=99.9,
+            barcoded_hifi_yield=12345600,
+            barcoded_hifi_yield_percentage=12.65,
+            completed_at=datetime.now(),
+            control_mean_read_concordance=0,
+            control_mean_read_length=0,
+            control_mode_read_concordance=0,
+            control_reads=0,
+            device_id=device_id,
+            failed_mean_read_length=0,
+            failed_reads=0,
+            failed_yield=0,
             hifi_mean_read_length=15000,
             hifi_median_read_quality="Q32",
-            percent_reads_passing_q30=92.3,
+            hifi_reads=123456789,
+            hifi_yield=12345678,
+            id=id,
+            movie_name="movie_name",
             p0_percent=79.1,
             p1_percent=13.1,
             p2_percent=0.1,
-            device_id=device_id,
-            completed_at=datetime.now(),
-            productive_zmws=123,
-            polymerase_mean_read_length=123,
-            polymerase_mean_longest_subread=123,
-            polymerase_read_length_n50=123,
+            percent_reads_passing_q30=92.3,
+            plate=1,
             polymerase_longest_subread_n50=123,
-            control_reads=0,
-            control_mean_read_length=0,
-            control_mean_read_concordance=0,
-            control_mode_read_concordance=0,
-            barcoded_hifi_yield_percentage=12.65,
-            failed_reads=0,
-            failed_mean_read_length=0,
-            failed_yield=0,
+            polymerase_mean_longest_subread=123,
+            polymerase_mean_read_length=123,
+            polymerase_read_length_n50=123,
+            productive_zmws=123,
+            sequencing_run=sequencing_run,
+            started_at=datetime.now(),
             unbarcoded_hifi_mean_read_length=0,
-            unbarcoded_hifi_yield=0,
             unbarcoded_hifi_reads=0,
+            unbarcoded_hifi_yield=0,
+            well="A01",
         )
         store.add_item_to_store(run)
         store.commit_to_store()

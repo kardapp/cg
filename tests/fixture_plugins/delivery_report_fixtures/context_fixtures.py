@@ -17,12 +17,11 @@ from cg.meta.delivery_report.rnafusion import RnafusionDeliveryReportAPI
 from cg.meta.workflow.analysis import AnalysisAPI
 from cg.meta.workflow.nf_analysis import NfAnalysisAPI
 from cg.meta.workflow.raredisease import RarediseaseAnalysisAPI
-from cg.meta.workflow.rnafusion import RnafusionAnalysisAPI
+from cg.meta.workflow.rnafusion_analysis_api import RnafusionAnalysisAPI
 from cg.models.cg_config import CGConfig
 from cg.models.delivery_report.report import ScoutVariantsFiles
 from cg.store.models import Analysis, Case, Sample
 from cg.store.store import Store
-from tests.conftest import raredisease_case_id
 from tests.store_helpers import StoreHelpers
 
 
@@ -43,8 +42,8 @@ def delivery_report_context(
     mocker.patch.object(LimsAPI, "get_sequencing_method", return_value=libary_sequencing_method)
     mocker.patch.object(LimsAPI, "capture_kit", return_value=capture_kit)
     mocker.patch.object(LimsAPI, "get_sample_dv200", return_value=75.0)
-    mocker.patch.object(LimsAPI, "get_latest_rna_input_amount", return_value=300.0)
     mocker.patch.object(LimsAPI, "get_sample_rin", return_value=10)
+    mocker.patch.object(LimsAPI, "get_input_amount", return_value=10.0)
     return cg_context
 
 

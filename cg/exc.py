@@ -60,12 +60,6 @@ class AnalysisRunningError(CgError):
     """
 
 
-class BalsamicStartError(CgError):
-    """
-    Exception raised when Balsamic fails to start.
-    """
-
-
 class BedVersionNotFoundError(CgError):
     """
     Exception raised when a bed version is not found.
@@ -93,12 +87,6 @@ class CgDataError(CgError):
 class SampleNotFoundError(CgDataError):
     """
     Exception raised when a sample is not found.
-    """
-
-
-class ChecksumFailedError(CgError):
-    """
-    Exception raised when the checksums of two files are not equal.
     """
 
 
@@ -148,6 +136,14 @@ class IlluminaRunEncryptionError(CgError):
 
 class IlluminaRunAlreadyBackedUpError(CgError):
     """Raised when a flow cell is already backed-up."""
+
+
+class PacbioSequencingRunAlreadyExistsError(CgError):
+    """Raised when a PacBio sequencing run already exists."""
+
+
+class PacbioSequencingRunNotFoundError(CgError):
+    """Raised when a PacBio sequencing run is not found."""
 
 
 class HousekeeperFileMissingError(CgError):
@@ -216,10 +212,6 @@ class RunParametersError(CgError):
     """Raised when something is wrong with the run parameters file."""
 
 
-class NfSampleSheetError(CgError):
-    """Raised when something is wrong with the sample sheet."""
-
-
 class SampleSheetContentError(CgError):
     """Raised when something is wrong with the sample sheet content."""
 
@@ -230,6 +222,10 @@ class SampleSheetFormatError(CgError):
 
 class ScoutUploadError(CgError):
     """Raised when uploading to Scout fails."""
+
+
+class ScoutExportError(CgError):
+    """Raised when exporting from Scout fails."""
 
 
 class StatinaAPIHTTPError(CgError):
@@ -243,7 +239,15 @@ class TicketCreationError(CgError):
 
 
 class TrailblazerAPIHTTPError(CgError):
-    """Raised when Trailblazer REST API response code is not 200."""
+    """Raised when Trailblazer REST API response code is not 2XX/3XX."""
+
+
+class TrailblazerAnalysisDeliveryError(TrailblazerAPIHTTPError):
+    """Raised when marking analyses as delivered in Trailblazer fails."""
+
+
+class TrailblazerFailedToGetAnalysesError(TrailblazerAPIHTTPError):
+    """Raised when Trailblazer API fails to get analyses."""
 
 
 class TrailblazerAnalysisNotFound(CgError):
@@ -344,9 +348,78 @@ class CaseNotConfiguredError(CgError):
     """Exception raised when a case is being run without a configuration."""
 
 
+class CaseWorkflowMismatchError(CgError):
+    """
+    Exception raised when a case is being run with a workflow different from the one specified
+    for it in the database.
+    """
+
+
 class MissingConfigFilesError(CgError):
     """Exception raised when a case is being run with missing configuration files."""
 
 
 class SeqeraError(CgError):
     """Exception raised when receiving an unexpected response from Seqera platform"""
+
+
+class MultipleCaptureKitsError(CgError):
+    """Exception raised when multiple capture kits are found where only one is expected."""
+
+
+class ApplicationDoesNotHaveHiFiYieldError(CgError):
+    """Exception raised when application does not have HiFi yield set."""
+
+
+class MissingLimsUdfError(CgError):
+    """Exception raised when the UDF of a genologics LIMS object can not be read."""
+
+
+class LimsWorkflowRoutingError(CgError):
+    """Exception raised when failing to route LIMS artifacts to a specified workflow."""
+
+
+class ApplicationTagNotFoundError(CgError):
+    """
+    Exception raised when an application is not found.
+    """
+
+
+class MultipleAnalysesToDeliverError(CgError):
+    """Exception raised when multiple analyses are ready for delivery for a case."""
+
+
+class FreshdeskError(CgError):
+    """General exception raised when something in Freshdesk fails."""
+
+
+class FreshdeskDeliveryMessageError(FreshdeskError):
+    """Exception raised when sending the delivery message in Freshdesk fails."""
+
+
+class FreshdeskGetTicketError(FreshdeskError):
+    """Exception raised when something went wrong when getting a Freshdesk ticket."""
+
+
+class FreshdeskUpdateTicketError(FreshdeskError):
+    """Exception raised when updating a ticket in Freshdesk fails."""
+
+
+class CustomerNotFoundError(CgError):
+    """Exception raised when a customer is not found in StatusDB"""
+
+
+class ExternalSampleNotFoundError(CgError):
+    """Exception raised when an external sample is not found in StatusDB"""
+
+
+class SubjectIdMissingError(OrderFormError):
+    """Exception raised when the subject_id is missing in the order form"""
+
+
+class MissingNegativeControlError(CgError):
+    """Exception raised when a case is missing a negative control"""
+
+
+class MultipleNegativeControlsError(CgError):
+    """Exception raised when a case has multiple a negative control"""

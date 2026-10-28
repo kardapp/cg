@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime
 
+from cg.constants.lims import LimsStatus
 from cg.models.orders.sample_base import PriorityEnum, SexEnum, StatusEnum
 from cg.services.orders.constants import ORDER_TYPE_WORKFLOW_MAP
 from cg.services.orders.lims_service.service import OrderLimsService
@@ -26,7 +27,7 @@ class StorePoolOrderService(StoreOrderService):
         self.lims = lims_service
 
     def store_order(self, order: OrderWithIndexedSamples) -> dict:
-        project_data, lims_map = self.lims.process_lims(
+        project_data, lims_samples = self.lims.process_lims(
             samples=order.samples,
             customer=order.customer,
             ticket=order._generated_ticket_id,
@@ -35,7 +36,8 @@ class StorePoolOrderService(StoreOrderService):
             delivery_type=order.delivery_type,
             skip_reception_control=order.skip_reception_control,
         )
-        self._fill_in_sample_ids(samples=order.samples, lims_map=lims_map)
+        self._fill_in_sample_ids(samples=order.samples, lims_samples=lims_samples)
+        self._queue_samples_in_workflow(lims_samples)
         new_records: list[Pool] = self.store_order_data_in_status_db(order=order)
         return {"project": project_data, "records": new_records}
 
@@ -52,21 +54,23 @@ class StorePoolOrderService(StoreOrderService):
                     ticket_id=str(db_order.ticket_id),
                 )
                 db_pool: Pool = self._create_db_pool(
+                    db_order=db_order,
                     pool=pool,
-                    order_name=order.name,
-                    ticket_id=str(db_order.ticket_id),
                     customer=db_order.customer,
                 )
                 for sample in pool[1]:
                     db_sample: Sample = self._create_db_sample(
                         sample=sample,
-                        order_name=order.name,
                         ticket_id=str(db_order.ticket_id),
                         customer=db_order.customer,
                         application_version=db_pool.application_version,
+                        pool=db_pool,
                     )
                     case_sample: CaseSample = self.status_db.relate_sample(
-                        case=db_case, sample=db_sample, status=StatusEnum.unknown
+                        case=db_case,
+                        sample=db_sample,
+                        status=StatusEnum.unknown,
+                        should_deliver_sample=True,
                     )
                     self.status_db.add_multiple_items_to_store([db_sample, case_sample])
                 new_pools.append(db_pool)
@@ -104,10 +108,8 @@ class StorePoolOrderService(StoreOrderService):
     def _create_db_order(self, order: OrderWithIndexedSamples) -> Order:
         """Return an Order database object."""
         ticket_id: int = order._generated_ticket_id
-        customer: Customer = self.status_db.get_customer_by_internal_id(
-            customer_internal_id=order.customer
-        )
-        return self.status_db.add_order(customer=customer, ticket_id=ticket_id)
+        customer: Customer = self.status_db.get_customer_by_internal_id_strict(order.customer)
+        return self.status_db.add_order(customer=customer, name=order.name, ticket_id=ticket_id)
 
     def _create_db_case_for_pool(
         self,
@@ -131,8 +133,7 @@ class StorePoolOrderService(StoreOrderService):
     def _create_db_pool(
         self,
         pool: tuple[str, list[IndexedSample]],
-        order_name: str,
-        ticket_id: str,
+        db_order: Order,
         customer: Customer,
     ) -> Pool:
         """Return a Pool database object."""
@@ -143,31 +144,35 @@ class StorePoolOrderService(StoreOrderService):
             application_version=application_version,
             customer=customer,
             name=pool[0],
-            order=order_name,
             ordered=datetime.now(),
-            ticket=ticket_id,
+            order=db_order,
         )
 
     def _create_db_sample(
         self,
         sample: IndexedSample,
-        order_name: str,
         ticket_id: str,
         customer: Customer,
         application_version: ApplicationVersion,
+        pool: Pool,
     ) -> Sample:
         """Return a Sample database object."""
+        lims_status: LimsStatus = (
+            LimsStatus.DONE if application_version.application.is_external else LimsStatus.PENDING
+        )
         return self.status_db.add_sample(
-            name=sample.name,
-            customer=customer,
             application_version=application_version,
-            sex=SexEnum.unknown,
             comment=sample.comment,
             control=sample.control,
+            customer=customer,
             internal_id=sample._generated_lims_id,
-            order=order_name,
+            lims_status=lims_status,
+            name=sample.name,
+            no_invoice=True,
             ordered=datetime.now(),
             original_ticket=ticket_id,
+            pool=pool,
             priority=sample.priority,
-            no_invoice=True,
+            sex=SexEnum.unknown,
+            skip_compression=application_version.application.is_external,
         )

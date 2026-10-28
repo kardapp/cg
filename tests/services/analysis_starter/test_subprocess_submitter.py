@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, create_autospec
 import pytest
 from pytest_mock import MockerFixture
 
+from cg.constants import Workflow
 from cg.constants.priority import SlurmQos
 from cg.services.analysis_starter.configurator.models.balsamic import BalsamicCaseConfig
 from cg.services.analysis_starter.configurator.models.microsalt import MicrosaltCaseConfig
@@ -25,6 +26,7 @@ from cg.services.analysis_starter.submitters.subprocess.submitter import (
             config_file="config_file",
             environment="environment",
             fastq_directory="fastq_directory",
+            pipeline_config_path="pipeline_config_path",
         ),
         MIPDNACaseConfig(
             case_id="case_id",
@@ -46,6 +48,8 @@ from cg.services.analysis_starter.submitters.subprocess.submitter import (
             head_job_partition="head_job_partition",
             qos=SlurmQos.LOW,
             sample_config=Path("sample_config"),
+            workflow=Workflow.BALSAMIC,
+            workflow_profile=Path("/path/to/balsamic"),
         ),
     ],
     ids=["microSALT", "MIP-DNA", "BALSAMIC"],
@@ -82,6 +86,7 @@ def test_microsalt_get_workflow_version(mocker: MockerFixture):
         config_file="microSALT.yml",
         environment="S_microSALT",
         fastq_directory="fastq/dir",
+        pipeline_config_path="pipeline_config.yaml",
     )
 
     # GIVEN that running a subprocess works
@@ -98,7 +103,7 @@ def test_microsalt_get_workflow_version(mocker: MockerFixture):
 
     # THEN the subprocess should have been called with the expected call
     mock_run.assert_called_once_with(
-        args=f"{case_config.conda_binary} run {case_config.binary} --version",
+        args=f"{case_config.conda_binary} run {case_config.binary} --config {case_config.pipeline_config_path} --version",
         shell=True,
         check=False,
         stdout=subprocess.PIPE,

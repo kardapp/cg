@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from cg.constants import DataDelivery, Priority, Workflow
 from cg.constants.archiving import PDC_ARCHIVE_LOCATION
+from cg.exc import PacbioSequencingRunAlreadyExistsError
 from cg.models.orders.constants import OrderType
 from cg.services.illumina.data_transfer.models import (
     IlluminaFlowCellDTO,
@@ -19,6 +20,7 @@ from cg.services.run_devices.pacbio.data_transfer_service.dto import (
     PacBioSampleSequencingMetricsDTO,
     PacBioSequencingRunDTO,
     PacBioSMRTCellDTO,
+    PacBioSMRTCellMetricsDTO,
 )
 from cg.store.crud.read import ReadHandler
 from cg.store.database import get_session
@@ -28,12 +30,11 @@ from cg.store.models import (
     Application,
     ApplicationLimitations,
     ApplicationVersion,
-    Bed,
-    BedVersion,
     Case,
     CaseSample,
     Collaboration,
     Customer,
+    ExternalSample,
     IlluminaFlowCell,
     IlluminaSampleSequencingMetrics,
     IlluminaSequencingRun,
@@ -44,6 +45,7 @@ from cg.store.models import (
     PacbioSampleSequencingMetrics,
     PacbioSequencingRun,
     PacbioSMRTCell,
+    PacbioSMRTCellMetrics,
     Panel,
     Pool,
     Sample,
@@ -114,6 +116,7 @@ class CreateMixin(ReadHandler):
         description: str,
         percent_kth: int,
         percent_reads_guaranteed: int,
+        read_type: str,
         is_accredited: bool = False,
         min_sequencing_depth: int = 0,
         **kwargs,
@@ -128,6 +131,7 @@ class CreateMixin(ReadHandler):
             min_sequencing_depth=min_sequencing_depth,
             percent_kth=percent_kth,
             percent_reads_guaranteed=percent_reads_guaranteed,
+            read_type=read_type,
             **kwargs,
         )
 
@@ -182,18 +186,6 @@ class CreateMixin(ReadHandler):
             **kwargs,
         )
 
-    def add_bed(self, name: str) -> Bed:
-        """Build a new bed record."""
-        return Bed(name=name)
-
-    def add_bed_version(self, bed: Bed, version: int, filename: str, shortname: str) -> BedVersion:
-        """Build a new bed version record."""
-        bed_version: BedVersion = BedVersion(
-            version=version, filename=filename, shortname=shortname
-        )
-        bed_version.bed = bed
-        return bed_version
-
     def add_sample(
         self,
         name: str,
@@ -203,8 +195,8 @@ class CreateMixin(ReadHandler):
         downsampled_to: int = None,
         internal_id: str = None,
         last_sequenced_at: datetime = None,
-        order: str = None,
         ordered: datetime = None,
+        pool: Pool | None = None,
         prepared_at: datetime = None,
         priority: Priority = None,
         received: datetime = None,
@@ -225,9 +217,9 @@ class CreateMixin(ReadHandler):
             is_tumour=tumour,
             last_sequenced_at=last_sequenced_at,
             name=name,
-            order=order,
             ordered_at=ordered or datetime.now(),
             original_ticket=original_ticket,
+            pool=pool,
             prepared_at=prepared_at,
             priority=priority,
             received_at=received,
@@ -271,12 +263,15 @@ class CreateMixin(ReadHandler):
         case: Case,
         sample: Sample,
         status: str,
+        should_deliver_sample: bool,
         mother: Sample = None,
         father: Sample = None,
     ) -> CaseSample:
         """Relate a sample record to a family record."""
 
-        new_record: CaseSample = CaseSample(status=status)
+        new_record: CaseSample = CaseSample(
+            status=status, should_deliver_sample=should_deliver_sample
+        )
         new_record.case = case
         new_record.sample = sample
         new_record.mother = mother
@@ -327,15 +322,15 @@ class CreateMixin(ReadHandler):
         self,
         customer: Customer,
         name: str,
-        order: str,
         ordered: datetime,
         application_version: ApplicationVersion,
-        ticket: str = None,
+        order: Order,
         comment: str = None,
         received_at: datetime = None,
         invoice_id: int = None,
         no_invoice: bool = None,
         delivered_at: datetime = None,
+        samples: list[Sample] | None = None,
     ) -> Pool:
         """Build a new Pool record."""
 
@@ -343,12 +338,12 @@ class CreateMixin(ReadHandler):
             name=name,
             ordered_at=ordered or datetime.now(),
             order=order,
-            ticket=ticket,
             received_at=received_at,
             comment=comment,
             delivered_at=delivered_at,
             invoice_id=invoice_id,
             no_invoice=no_invoice,
+            samples=samples or [],
         )
         new_record.customer = customer
         new_record.application_version = application_version
@@ -401,10 +396,11 @@ class CreateMixin(ReadHandler):
             **kwargs,
         )
 
-    def add_order(self, customer: Customer, ticket_id: int, **kwargs) -> Order:
+    def add_order(self, customer: Customer, name: str, ticket_id: int, **kwargs) -> Order:
         """Build a new Order record."""
         order = Order(
             customer=customer,
+            name=name,
             order_date=datetime.now(),
             ticket_id=ticket_id,
             **kwargs,
@@ -500,47 +496,77 @@ class CreateMixin(ReadHandler):
         self.add_item_to_store(new_smrt_cell)
         return new_smrt_cell
 
-    def create_pac_bio_sequencing_run(
-        self, sequencing_run_dto: PacBioSequencingRunDTO, smrt_cell: PacbioSMRTCell
+    def create_pacbio_sequencing_run(
+        self, pacbio_sequencing_run_dto: PacBioSequencingRunDTO
     ) -> PacbioSequencingRun:
-        LOG.debug(f"Creating Pacbio sequencing run for SMRT cell {smrt_cell.internal_id}")
-        new_sequencing_run = PacbioSequencingRun(
-            type=sequencing_run_dto.type,
-            well=sequencing_run_dto.well,
-            plate=sequencing_run_dto.plate,
-            run_name=sequencing_run_dto.run_name,
-            movie_name=sequencing_run_dto.movie_name,
-            started_at=sequencing_run_dto.started_at,
-            completed_at=sequencing_run_dto.completed_at,
-            hifi_reads=sequencing_run_dto.hifi_reads,
-            hifi_yield=sequencing_run_dto.hifi_yield,
-            hifi_mean_read_length=sequencing_run_dto.hifi_mean_read_length,
-            hifi_median_read_quality=sequencing_run_dto.hifi_median_read_quality,
-            percent_reads_passing_q30=sequencing_run_dto.percent_reads_passing_q30,
-            productive_zmws=sequencing_run_dto.productive_zmws,
-            p0_percent=sequencing_run_dto.p0_percent,
-            p1_percent=sequencing_run_dto.p1_percent,
-            p2_percent=sequencing_run_dto.p2_percent,
-            polymerase_mean_read_length=sequencing_run_dto.polymerase_mean_read_length,
-            polymerase_read_length_n50=sequencing_run_dto.polymerase_read_length_n50,
-            polymerase_mean_longest_subread=sequencing_run_dto.polymerase_mean_longest_subread,
-            polymerase_longest_subread_n50=sequencing_run_dto.polymerase_longest_subread_n50,
-            control_reads=sequencing_run_dto.control_reads,
-            control_mean_read_length=sequencing_run_dto.control_mean_read_length,
-            control_mean_read_concordance=sequencing_run_dto.control_mean_read_concordance,
-            control_mode_read_concordance=sequencing_run_dto.control_mode_read_concordance,
-            failed_reads=sequencing_run_dto.failed_reads,
-            failed_yield=sequencing_run_dto.failed_yield,
-            failed_mean_read_length=sequencing_run_dto.failed_mean_read_length,
-            barcoded_hifi_reads=sequencing_run_dto.barcoded_hifi_reads,
-            barcoded_hifi_reads_percentage=sequencing_run_dto.barcoded_hifi_reads_percentage,
-            barcoded_hifi_yield=sequencing_run_dto.barcoded_hifi_yield,
-            barcoded_hifi_yield_percentage=sequencing_run_dto.barcoded_hifi_yield_percentage,
-            barcoded_hifi_mean_read_length=sequencing_run_dto.barcoded_hifi_mean_read_length,
-            unbarcoded_hifi_reads=sequencing_run_dto.unbarcoded_hifi_reads,
-            unbarcoded_hifi_yield=sequencing_run_dto.unbarcoded_hifi_yield,
-            unbarcoded_hifi_mean_read_length=sequencing_run_dto.unbarcoded_hifi_mean_read_length,
+        """Create a new PacBio sequencing run
+
+        Raises PacbioSequencingRunAlreadyExistsError:
+        - When run name already exists in the database
+        """
+        if (
+            self._get_query(table=PacbioSequencingRun)
+            .filter(PacbioSequencingRun.run_id == pacbio_sequencing_run_dto.run_id)
+            .first()
+        ):
+            raise PacbioSequencingRunAlreadyExistsError(
+                message=f"{pacbio_sequencing_run_dto.run_id} already exists."
+            )
+        else:
+            LOG.debug(f"Creating Pacbio Sequencing Run for {pacbio_sequencing_run_dto.run_id}")
+            sequencing_run = PacbioSequencingRun(
+                instrument_name=pacbio_sequencing_run_dto.instrument_name,
+                run_id=pacbio_sequencing_run_dto.run_id,
+                run_name=pacbio_sequencing_run_dto.run_name,
+                unique_id=pacbio_sequencing_run_dto.unique_id,
+            )
+            self.add_item_to_store(sequencing_run)
+            return sequencing_run
+
+    def create_pacbio_smrt_cell_metrics(
+        self,
+        sequencing_run: PacbioSequencingRun,
+        smrt_cell_metrics_dto: PacBioSMRTCellMetricsDTO,
+        smrt_cell: PacbioSMRTCell,
+    ) -> PacbioSMRTCellMetrics:
+        LOG.debug(f"Creating Pacbio SMRT cell metrics for SMRT cell {smrt_cell.internal_id}")
+        new_sequencing_run = PacbioSMRTCellMetrics(
+            barcoded_hifi_mean_read_length=smrt_cell_metrics_dto.barcoded_hifi_mean_read_length,
+            barcoded_hifi_reads=smrt_cell_metrics_dto.barcoded_hifi_reads,
+            barcoded_hifi_reads_percentage=smrt_cell_metrics_dto.barcoded_hifi_reads_percentage,
+            barcoded_hifi_yield=smrt_cell_metrics_dto.barcoded_hifi_yield,
+            barcoded_hifi_yield_percentage=smrt_cell_metrics_dto.barcoded_hifi_yield_percentage,
+            completed_at=smrt_cell_metrics_dto.completed_at,
+            control_mean_read_concordance=smrt_cell_metrics_dto.control_mean_read_concordance,
+            control_mean_read_length=smrt_cell_metrics_dto.control_mean_read_length,
+            control_mode_read_concordance=smrt_cell_metrics_dto.control_mode_read_concordance,
+            control_reads=smrt_cell_metrics_dto.control_reads,
             device=smrt_cell,
+            failed_mean_read_length=smrt_cell_metrics_dto.failed_mean_read_length,
+            failed_reads=smrt_cell_metrics_dto.failed_reads,
+            failed_yield=smrt_cell_metrics_dto.failed_yield,
+            hifi_mean_read_length=smrt_cell_metrics_dto.hifi_mean_read_length,
+            hifi_median_read_quality=smrt_cell_metrics_dto.hifi_median_read_quality,
+            hifi_reads=smrt_cell_metrics_dto.hifi_reads,
+            hifi_yield=smrt_cell_metrics_dto.hifi_yield,
+            movie_name=smrt_cell_metrics_dto.movie_name,
+            p0_percent=smrt_cell_metrics_dto.p0_percent,
+            p1_percent=smrt_cell_metrics_dto.p1_percent,
+            p2_percent=smrt_cell_metrics_dto.p2_percent,
+            percent_reads_passing_q30=smrt_cell_metrics_dto.percent_reads_passing_q30,
+            plate=smrt_cell_metrics_dto.plate,
+            polymerase_longest_subread_n50=smrt_cell_metrics_dto.polymerase_longest_subread_n50,
+            polymerase_mean_longest_subread=smrt_cell_metrics_dto.polymerase_mean_longest_subread,
+            polymerase_mean_read_length=smrt_cell_metrics_dto.polymerase_mean_read_length,
+            polymerase_read_length_n50=smrt_cell_metrics_dto.polymerase_read_length_n50,
+            productive_zmws=smrt_cell_metrics_dto.productive_zmws,
+            sequencing_run=sequencing_run,
+            started_at=smrt_cell_metrics_dto.started_at,
+            type=smrt_cell_metrics_dto.type,
+            unbarcoded_hifi_mean_read_length=smrt_cell_metrics_dto.unbarcoded_hifi_mean_read_length,
+            unbarcoded_hifi_reads=smrt_cell_metrics_dto.unbarcoded_hifi_reads,
+            unbarcoded_hifi_yield=smrt_cell_metrics_dto.unbarcoded_hifi_yield,
+            well=smrt_cell_metrics_dto.well,
         )
         self.add_item_to_store(new_sequencing_run)
         return new_sequencing_run
@@ -548,11 +574,11 @@ class CreateMixin(ReadHandler):
     def create_pac_bio_sample_sequencing_run(
         self,
         sample_run_metrics_dto: PacBioSampleSequencingMetricsDTO,
-        sequencing_run: PacbioSequencingRun,
+        smrt_cell_metrics: PacbioSMRTCellMetrics,
     ) -> PacbioSampleSequencingMetrics:
         sample_id: str = sample_run_metrics_dto.sample_internal_id
         LOG.debug(f"Creating Pacbio sample sequencing metric for sample {sample_id}")
-        sample: Sample = self.get_sample_by_internal_id(sample_id)
+        sample: Sample = self.get_sample_by_internal_id_strict(sample_id)
         if not sample:
             self.rollback()
             raise EntryNotFoundError(f"Sample not found: {sample_id}")
@@ -562,8 +588,21 @@ class CreateMixin(ReadHandler):
             hifi_yield=sample_run_metrics_dto.hifi_yield,
             hifi_mean_read_length=sample_run_metrics_dto.hifi_mean_read_length,
             hifi_median_read_quality=sample_run_metrics_dto.hifi_median_read_quality,
-            instrument_run=sequencing_run,
+            instrument_run=smrt_cell_metrics,
             polymerase_mean_read_length=sample_run_metrics_dto.polymerase_mean_read_length,
         )
         self.add_item_to_store(new_sample_sequencing_run)
         return new_sample_sequencing_run
+
+    def add_external_sample(
+        self, customer_id: int, sample_name: str, customer_uploaded_at: datetime
+    ) -> ExternalSample:
+
+        external_sample = ExternalSample(
+            customer_id=customer_id,
+            sample_name=sample_name,
+            customer_uploaded_at=customer_uploaded_at,
+        )
+
+        self.add_item_to_store(external_sample)
+        return external_sample

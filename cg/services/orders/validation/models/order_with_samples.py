@@ -1,10 +1,25 @@
+from typing import TypeVar
+
 from cg.services.orders.validation.models.order import Order
 from cg.services.orders.validation.models.sample import Sample
+from cg.store.store import Store
+
+SampleType = TypeVar("SampleType", bound=Sample)
 
 
-class OrderWithSamples(Order):
-    samples: list[Sample]
+class OrderWithSamples(Order[SampleType]):
+    samples: list[SampleType]
+
+    def external_samples(self, status_db: Store) -> list[SampleType]:
+        """
+        Return external samples. This assumes that the order has already been validated.
+        """
+        external_samples: list[SampleType] = []
+        for sample in self.samples:
+            if status_db.get_application_by_tag_strict(sample.application).is_external:
+                external_samples.append(sample)
+        return external_samples
 
     @property
-    def enumerated_samples(self) -> enumerate[Sample]:
+    def enumerated_samples(self) -> enumerate[SampleType]:
         return enumerate(self.samples)

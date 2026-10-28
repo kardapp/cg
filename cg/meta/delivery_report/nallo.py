@@ -45,6 +45,9 @@ class NalloDeliveryReportAPI(DeliveryReportAPI):
         )
         return NalloSampleMetadataModel(
             initial_qc=self.lims_api.has_sample_passed_initial_qc(sample.internal_id),
+            input_amount=self.lims_api.get_input_amount(
+                sample_id=sample.internal_id, sample_type="revio"
+            ),
             avg_sequence_length=sample_metrics.avg_sequence_length,
             coverage_bases=sample_metrics.coverage_bases / 1_000_000_000,
             duplicates=sample_metrics.percent_duplicates,
@@ -52,7 +55,7 @@ class NalloDeliveryReportAPI(DeliveryReportAPI):
             median_coverage=sample_metrics.median_coverage,
             million_read_pairs=get_million_read_pairs(sample.reads),
             pct_10x=coverage_metrics.coverage_completeness_percent if coverage_metrics else None,
-            sex=sample_metrics.predicted_sex_sex_check,
+            sex=sample_metrics.predicted_sex,
         )
 
     def is_report_accredited(

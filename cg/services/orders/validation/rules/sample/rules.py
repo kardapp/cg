@@ -1,4 +1,5 @@
 from cg.models.orders.constants import OrderType
+from cg.models.orders.sample_base import SexEnum
 from cg.services.orders.validation.errors.sample_errors import (
     ApplicationArchivedError,
     ApplicationNotCompatibleError,
@@ -13,12 +14,14 @@ from cg.services.orders.validation.errors.sample_errors import (
     IndexNumberMissingError,
     IndexNumberOutOfRangeError,
     InvalidVolumeError,
+    MissingSourceCommentError,
     OccupiedWellError,
     PoolApplicationError,
     PoolPriorityError,
     SampleError,
     SampleNameNotAvailableControlError,
     SampleNameRepeatedError,
+    SexUnknownWarning,
     VolumeRequiredError,
     WellFormatError,
     WellFormatRmlError,
@@ -31,7 +34,10 @@ from cg.services.orders.validation.models.order_aliases import (
 )
 from cg.services.orders.validation.models.sample_aliases import IndexedSample
 from cg.services.orders.validation.order_types.fastq.models.order import FastqOrder
+from cg.services.orders.validation.order_types.metagenome.models.order import MetagenomeOrder
 from cg.services.orders.validation.order_types.microsalt.models.order import OrderWithSamples
+from cg.services.orders.validation.order_types.pacbio_long_read.models.order import PacbioOrder
+from cg.services.orders.validation.order_types.taxprofiler.models.order import TaxprofilerOrder
 from cg.services.orders.validation.rules.sample.utils import (
     PlateSamplesValidator,
     get_indices_for_repeated_sample_names,
@@ -387,3 +393,25 @@ def validate_well_positions_required_rml(
             error = WellPositionRmlMissingError(sample_index=sample_index)
             errors.append(error)
     return errors
+
+
+def validate_source_comment_required(
+    order: FastqOrder | MetagenomeOrder | TaxprofilerOrder | PacbioOrder, **kwargs
+) -> list[MissingSourceCommentError]:
+    errors: list[MissingSourceCommentError] = []
+    for sample_index, sample in order.enumerated_samples:
+        if sample.source == "other" and not sample.source_comment:
+            error = MissingSourceCommentError(sample_index=sample_index)
+            errors.append(error)
+    return errors
+
+
+def warn_if_sex_unknown(
+    order: OrderWithSamples | FastqOrder | PacbioOrder, **kwargs
+) -> list[SexUnknownWarning]:
+    warnings: list[SexUnknownWarning] = []
+    for sample_index, sample in order.enumerated_samples:
+        if sample.sex == SexEnum.unknown:
+            warning = SexUnknownWarning(sample_index=sample_index)
+            warnings.append(warning)
+    return warnings

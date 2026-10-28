@@ -1,5 +1,4 @@
 import logging
-from typing import Type
 
 import rich_click as click
 from housekeeper.store.models import Archive, File
@@ -15,7 +14,8 @@ from cg.store.models import Case, Order, Sample
 from cg.store.store import Store
 
 LOG = logging.getLogger(__name__)
-ARCHIVE_HANDLERS: dict[str, Type[ArchiveHandler]] = {
+
+ARCHIVE_HANDLERS: dict[str, type[ArchiveHandler]] = {
     ArchiveLocations.KAROLINSKA_BUCKET: DDNDataFlowClient
 }
 
@@ -55,18 +55,13 @@ class SpringArchiveAPI:
             archive_handler: ArchiveHandler = ARCHIVE_HANDLERS[archive_location](
                 self.data_flow_config
             )
-            for file_and_sample in files_and_samples_for_location:
-                self.archive_file(file_and_sample=file_and_sample, archive_handler=archive_handler)
-
+            job_id: int = archive_handler.archive_files(files_and_samples_for_location)
+            self.housekeeper_api.add_archives(
+                files=[file_and_sample.file for file_and_sample in files_and_samples_for_location],
+                archive_task_id=job_id,
+            )
         else:
             LOG.info(f"No files to archive for location {archive_location}.")
-
-    def archive_file(self, file_and_sample: FileAndSample, archive_handler: ArchiveHandler) -> None:
-        job_id: int = archive_handler.archive_file(file_and_sample)
-        self.housekeeper_api.add_archives(
-            files=[file_and_sample.file],
-            archive_task_id=job_id,
-        )
 
     def retrieve_files_from_archive_location(
         self, files_and_samples: list[FileAndSample], archive_location: str

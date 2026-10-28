@@ -1,6 +1,10 @@
+from unittest.mock import create_autospec
+
 import pytest
 
+from cg.apps.lims.api import LimsAPI
 from cg.clients.freshdesk.freshdesk_client import FreshdeskClient
+from cg.models.cg_config import NatsConfig
 from cg.services.orders.storing.service_registry import (
     StoringServiceRegistry,
     setup_storing_service_registry,
@@ -25,18 +29,23 @@ def model_validator() -> ModelValidator:
 
 @pytest.fixture
 def order_validation_service(store_to_submit_and_validate_orders: Store) -> OrderValidationService:
-    return OrderValidationService(store_to_submit_and_validate_orders)
+    return OrderValidationService(
+        lims_api=create_autospec(LimsAPI), store=store_to_submit_and_validate_orders
+    )
 
 
 @pytest.fixture(scope="function")
 def order_submitter(
-    ticket_handler: TicketHandler,
-    storing_service_registry: StoringServiceRegistry,
     order_validation_service: OrderValidationService,
+    store_to_submit_and_validate_orders: Store,
+    storing_service_registry: StoringServiceRegistry,
+    ticket_handler: TicketHandler,
 ) -> OrderSubmitter:
     return OrderSubmitter(
-        ticket_handler=ticket_handler,
+        nats_config=create_autospec(NatsConfig),
+        status_db=store_to_submit_and_validate_orders,
         storing_registry=storing_service_registry,
+        ticket_handler=ticket_handler,
         validation_service=order_validation_service,
     )
 

@@ -13,9 +13,7 @@ from cg.exc import ArchiveJobFailedError, DdnDataflowAuthenticationError, DdnDat
 from cg.io.api import get, post
 from cg.meta.archive.ddn.constants import (
     DELETE_FILE_SUCCESSFUL_MESSAGE,
-    DESTINATION_ATTRIBUTE,
     FAILED_JOB_STATUSES,
-    SOURCE_ATTRIBUTE,
     DataflowEndpoints,
     JobStatus,
 )
@@ -31,7 +29,7 @@ from cg.meta.archive.ddn.models import (
     RetrievalResponse,
     TransferPayload,
 )
-from cg.meta.archive.ddn.utils import get_metadata, get_request_log
+from cg.meta.archive.ddn.utils import get_request_log
 from cg.meta.archive.models import ArchiveHandler, FileAndSample
 from cg.models.cg_config import DataFlowConfig
 
@@ -42,19 +40,20 @@ class DDNDataFlowClient(ArchiveHandler):
     """Class for archiving and retrieving folders via DDN Dataflow."""
 
     def __init__(self, config: DataFlowConfig):
-        self.database_name: str = config.database_name
-        self.user: str = config.user
-        self.password: str = config.password
-        self.url: str = config.url
         self.archive_repository: str = config.archive_repository
-        self.local_storage: str = config.local_storage
         self.auth_token: str
-        self.refresh_token: str
-        self.token_expiration: datetime
+        self.database_name: str = config.database_name
         self.headers: dict[str, str] = {
             "Content-Type": "application/json",
             "accept": "application/json",
         }
+        self.data_mover_housekeeper_mnt = config.data_mover_housekeeper_mnt
+        self.local_storage: str = config.local_storage
+        self.password: str = config.password
+        self.refresh_token: str
+        self.token_expiration: datetime
+        self.url: str = config.url
+        self.user: str = config.user
         self._set_auth_tokens()
 
     def _set_auth_tokens(self) -> None:
@@ -103,17 +102,16 @@ class DDNDataFlowClient(ArchiveHandler):
             self._refresh_auth_token()
         return {"Authorization": f"Bearer {self.auth_token}"}
 
-    def archive_file(self, file_and_sample: FileAndSample) -> int:
+    def archive_files(self, files_and_samples: list[FileAndSample]) -> int:
         """Archives all files provided, to their corresponding destination, as given by sources
         and destination in TransferData. Returns the job ID of the archiving task."""
         miria_file_data: list[MiriaObject] = self.convert_into_transfer_data(
-            [file_and_sample], is_archiving=True
+            files_and_samples=files_and_samples, is_archiving=True
         )
-        metadata: list[dict] = get_metadata(file_and_sample.sample)
         archival_request: TransferPayload = self.create_transfer_request(
-            miria_file_data=miria_file_data, is_archiving_request=True, metadata=metadata
+            miria_file_data=miria_file_data, is_archiving_request=True
         )
-        archival_response: ArchivalResponse = self._archive_file(
+        archival_response: ArchivalResponse = self._archive_files(
             headers=dict(self.headers, **self.auth_header),
             body=archival_request,
         )
@@ -138,27 +136,23 @@ class DDNDataFlowClient(ArchiveHandler):
         self,
         miria_file_data: list[MiriaObject],
         is_archiving_request: bool,
-        metadata: list[dict] = [],
     ) -> TransferPayload:
         """Performs the necessary curation of paths for the request to be valid, depending on if
         it is an archiving or a retrieve request.
         """
         source_prefix: str
         destination_prefix: str
-        attribute: str
 
-        source_prefix, destination_prefix, attribute = (
-            (self.local_storage, self.archive_repository, SOURCE_ATTRIBUTE)
+        source_prefix, destination_prefix = (
+            (self.local_storage, self.archive_repository)
             if is_archiving_request
-            else (self.archive_repository, self.local_storage, DESTINATION_ATTRIBUTE)
+            else (self.archive_repository, self.local_storage)
         )
 
         transfer_request = TransferPayload(
             files_to_transfer=miria_file_data,
             createFolder=is_archiving_request,
-            metadataList=metadata,
         )
-        transfer_request.trim_paths(attribute_to_trim=attribute)
         transfer_request.add_repositories(
             source_prefix=source_prefix, destination_prefix=destination_prefix
         )
@@ -169,12 +163,28 @@ class DDNDataFlowClient(ArchiveHandler):
         self, files_and_samples: list[FileAndSample], is_archiving: bool = True
     ) -> list[MiriaObject]:
         """Converts the provided files and samples to the format used for the request."""
-        return [
-            MiriaObject.create_from_file_and_sample(
-                file=file_and_sample.file, sample=file_and_sample.sample, is_archiving=is_archiving
-            )
-            for file_and_sample in files_and_samples
-        ]
+        if is_archiving:
+            return [
+                MiriaObject(
+                    destination=file_and_sample.sample.internal_id,
+                    source=Path(
+                        self.data_mover_housekeeper_mnt, file_and_sample.file.path
+                    ).as_posix(),
+                )
+                for file_and_sample in files_and_samples
+            ]
+        else:
+            return [
+                MiriaObject(
+                    destination=Path(
+                        self.data_mover_housekeeper_mnt, file_and_sample.file.path
+                    ).parent.as_posix(),
+                    source=Path(
+                        file_and_sample.sample.internal_id, Path(file_and_sample.file.path).name
+                    ).as_posix(),
+                )
+                for file_and_sample in files_and_samples
+            ]
 
     def is_job_done(self, job_id: int) -> bool:
         """Returns True if the specified job is completed, and false if it is still ongoing.
@@ -214,7 +224,7 @@ class DDNDataFlowClient(ArchiveHandler):
                 f"Deletion failed with message {delete_file_response.message}"
             )
 
-    def _archive_file(self, body: BaseModel, headers: dict) -> ArchivalResponse:
+    def _archive_files(self, body: BaseModel, headers: dict) -> ArchivalResponse:
         """Archives a file via DDN and validates the response."""
         response: Response = self._post_request(
             body=body, endpoint=DataflowEndpoints.ARCHIVE_FILES, headers=headers

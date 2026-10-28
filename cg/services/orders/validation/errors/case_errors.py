@@ -77,3 +77,18 @@ class ExistingCaseWithoutAffectedSampleError(CaseError):
 class MultiplePrepCategoriesError(CaseError):
     field: str = "sample_errors"
     message: str = "Case cannot contain samples with incompatible applications"
+
+
+class SamplesNotRelatedError(CaseError):
+    field: str = "sample_errors"
+    message: str
+
+
+class SampleSourceMismatchError(CaseError):
+    field: str = "sample_errors"
+    message: str
+
+
+class SubjectIdRepeatedError(CaseError):
+    field: str = "sample_errors"
+    message: str

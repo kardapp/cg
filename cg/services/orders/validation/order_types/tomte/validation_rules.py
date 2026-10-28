@@ -1,9 +1,13 @@
+from typing import Callable
+
 from cg.services.orders.validation.rules.case.rules import (
     validate_case_internal_ids_exist,
     validate_case_names_available,
     validate_case_names_not_repeated,
     validate_existing_cases_belong_to_collaboration,
+    validate_gene_panels_exist,
     validate_gene_panels_unique,
+    validate_samples_have_same_source,
 )
 from cg.services.orders.validation.rules.case_sample.rules import (
     validate_application_compatibility,
@@ -18,13 +22,14 @@ from cg.services.orders.validation.rules.case_sample.rules import (
     validate_existing_samples_compatible_with_order_type,
     validate_fathers_are_male,
     validate_fathers_in_same_case_as_children,
-    validate_gene_panels_exist,
+    validate_matching_normal_dna_for_rna_samples,
     validate_mothers_are_female,
     validate_mothers_in_same_case_as_children,
     validate_pedigree,
     validate_sample_names_different_from_case_names,
     validate_sample_names_not_repeated,
     validate_samples_exist,
+    validate_source_comment_required,
     validate_subject_ids_different_from_case_names,
     validate_subject_ids_different_from_sample_names,
     validate_subject_sex_consistency,
@@ -34,18 +39,20 @@ from cg.services.orders.validation.rules.case_sample.rules import (
     validate_well_position_format,
     validate_well_positions_required,
     validate_wells_contain_at_most_one_sample,
+    warn_if_sex_unknown,
 )
 
-TOMTE_CASE_RULES: list[callable] = [
+TOMTE_CASE_RULES: list[Callable] = [
     validate_case_internal_ids_exist,
     validate_case_names_available,
     validate_case_names_not_repeated,
     validate_existing_cases_belong_to_collaboration,
     validate_gene_panels_exist,
     validate_gene_panels_unique,
+    validate_samples_have_same_source,
 ]
 
-TOMTE_CASE_SAMPLE_RULES: list[callable] = [
+TOMTE_CASE_SAMPLE_RULES: list[Callable] = [
     validate_application_compatibility,
     validate_application_exists,
     validate_application_not_archived,
@@ -60,10 +67,12 @@ TOMTE_CASE_SAMPLE_RULES: list[callable] = [
     validate_fathers_in_same_case_as_children,
     validate_mothers_are_female,
     validate_mothers_in_same_case_as_children,
+    validate_matching_normal_dna_for_rna_samples,
     validate_pedigree,
     validate_samples_exist,
     validate_sample_names_different_from_case_names,
     validate_sample_names_not_repeated,
+    validate_source_comment_required,
     validate_subject_ids_different_from_case_names,
     validate_subject_ids_different_from_sample_names,
     validate_subject_sex_consistency,
@@ -73,4 +82,5 @@ TOMTE_CASE_SAMPLE_RULES: list[callable] = [
     validate_well_position_format,
     validate_well_positions_required,
     validate_wells_contain_at_most_one_sample,
+    warn_if_sex_unknown,
 ]

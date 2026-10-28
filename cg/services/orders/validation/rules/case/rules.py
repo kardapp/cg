@@ -1,3 +1,6 @@
+from typing import Counter
+
+from cg.apps.lims import LimsAPI
 from cg.models.orders.sample_base import StatusEnum
 from cg.services.orders.validation.errors.case_errors import (
     CaseDoesNotExistError,
@@ -6,6 +9,7 @@ from cg.services.orders.validation.errors.case_errors import (
     DoubleNormalError,
     DoubleTumourError,
     ExistingCaseWithoutAffectedSampleError,
+    InvalidGenePanelsError,
     MoreThanTwoSamplesInCaseError,
     MultiplePrepCategoriesError,
     MultipleSamplesInCaseError,
@@ -14,20 +18,31 @@ from cg.services.orders.validation.errors.case_errors import (
     NumberOfNormalSamplesError,
     RepeatedCaseNameError,
     RepeatedGenePanelsError,
+    SamplesNotRelatedError,
+    SampleSourceMismatchError,
+    SubjectIdRepeatedError,
 )
-from cg.services.orders.validation.models.case import Case
 from cg.services.orders.validation.models.order_with_cases import OrderWithCases
 from cg.services.orders.validation.order_types.balsamic.models.order import BalsamicOrder
 from cg.services.orders.validation.order_types.balsamic_umi.models.order import BalsamicUmiOrder
 from cg.services.orders.validation.order_types.mip_dna.models.order import MIPDNAOrder
 from cg.services.orders.validation.order_types.nallo.models.order import NalloOrder
+from cg.services.orders.validation.order_types.raredisease.models.order import RarediseaseOrder
+from cg.services.orders.validation.order_types.tomte.models.order import TomteOrder
 from cg.services.orders.validation.rules.case.utils import (
     contains_duplicates,
+    does_case_exist,
     get_case_prep_categories,
+    get_invalid_panels,
+    get_sample_name,
+    get_sample_sources,
+    get_subject_ids,
     is_case_not_from_collaboration,
     is_double_normal,
     is_double_tumour,
     is_normal_only_wgs,
+    is_sample_lineal_in_case,
+    is_single_sample_case,
 )
 from cg.services.orders.validation.rules.case_sample.utils import get_repeated_case_name_errors
 from cg.store.models import Case as DbCase
@@ -64,8 +79,8 @@ def validate_case_internal_ids_exist(
 ) -> list[CaseDoesNotExistError]:
     errors: list[CaseDoesNotExistError] = []
     for case_index, case in order.enumerated_existing_cases:
-        case: Case | None = store.get_case_by_internal_id(case.internal_id)
-        if not case:
+        db_case: DbCase | None = store.get_case_by_internal_id(case.internal_id)
+        if not db_case:
             error = CaseDoesNotExistError(case_index=case_index)
             errors.append(error)
     return errors
@@ -158,7 +173,9 @@ def validate_existing_cases_have_an_affected_sample(
 ) -> list[ExistingCaseWithoutAffectedSampleError]:
     errors: list[ExistingCaseWithoutAffectedSampleError] = []
     for case_index, case in order.enumerated_existing_cases:
-        db_case: DbCase = store.get_case_by_internal_id(case.internal_id)
+        db_case: DbCase | None = store.get_case_by_internal_id(case.internal_id)
+        if not db_case:  # Error should be returned elsewhere
+            continue
         if all(link.status != StatusEnum.affected for link in db_case.links):
             error = ExistingCaseWithoutAffectedSampleError(case_index=case_index)
             errors.append(error)
@@ -173,5 +190,115 @@ def validate_samples_in_case_have_same_prep_category(
         prep_categories: set[str] = get_case_prep_categories(case=case, store=store)
         if len(prep_categories) > 1:
             error = MultiplePrepCategoriesError(case_index=case_index)
+            errors.append(error)
+    return errors
+
+
+def validate_case_lineal_relations(
+    order: MIPDNAOrder, store: Store, **kwargs
+) -> list[SamplesNotRelatedError]:
+    """Validate lineal relations in the case, i.e. samples are either parents or children."""
+    errors: list[SamplesNotRelatedError] = []
+    for case_index, case in order.enumerated_new_cases:
+        if not does_case_exist(case=case, store=store):  # Error should be raised elsewhere
+            continue
+        if is_single_sample_case(case=case, store=store):  # This should always pass
+            continue
+        case_has_error = False
+        nonlineal_samples: list[str] = []
+        for _, sample in case.enumerated_samples:
+            if not is_sample_lineal_in_case(sample=sample, case=case, store=store):
+                case_has_error = True
+                nonlineal_samples.append(get_sample_name(sample=sample, store=store))
+        if case_has_error:
+            error = SamplesNotRelatedError(
+                case_index=case_index,
+                message=f"Samples {nonlineal_samples} are not related to other samples within the case.",
+            )
+            errors.append(error)
+    return errors
+
+
+def validate_case_lineal_or_collateral_relations(
+    order: RarediseaseOrder, store: Store, **kwargs
+) -> list[SamplesNotRelatedError]:
+    """Validate lineal or collateral relations in the case, i.e. samples
+    can be parents or children but also e.g. siblings or cousins.
+
+    All samples are assumed to be collateral only if there are no lineal relations.
+    """
+    errors: list[SamplesNotRelatedError] = []
+    for case_index, case in order.enumerated_new_cases:
+        if not does_case_exist(case=case, store=store):  # Error should be raised elsewhere
+            continue
+        if is_single_sample_case(case=case, store=store):  # This should always pass
+            continue
+        case_has_error = False
+
+        # Collect samples which are not parents nor have parents
+        nonlineal_samples: list[str] = []
+        for sample in case.samples:
+            if not is_sample_lineal_in_case(sample=sample, case=case, store=store):
+                nonlineal_samples.append(get_sample_name(sample=sample, store=store))
+
+        if nonlineal_samples:
+            if len(nonlineal_samples) == len(case.samples):
+                # If the case consists of ONLY nonlineal samples, they are assumed to be collateral
+                pass
+            else:
+                case_has_error = True
+
+        if case_has_error:
+            error = SamplesNotRelatedError(
+                case_index=case_index,
+                message=f"Samples {nonlineal_samples} are not related to other samples within the case.",
+            )
+            errors.append(error)
+    return errors
+
+
+def validate_samples_have_same_source(
+    order: TomteOrder, store: Store, lims_api: LimsAPI, **kwargs
+) -> list[SampleSourceMismatchError]:
+    errors: list[SampleSourceMismatchError] = []
+    for case_index, case in order.enumerated_cases:
+        sample_sources: set = get_sample_sources(case=case, lims_api=lims_api, store=store)
+        if len(sample_sources) > 1:
+            error = SampleSourceMismatchError(
+                case_index=case_index,
+                message=f"Case contains samples of more than one source: {sample_sources}",
+            )
+            errors.append(error)
+    return errors
+
+
+def validate_gene_panels_exist(
+    order: OrderWithCases,
+    store: Store,
+    **kwargs,
+) -> list[InvalidGenePanelsError]:
+    errors: list[InvalidGenePanelsError] = []
+    for case_index, case in order.enumerated_new_cases:
+        if invalid_panels := get_invalid_panels(panels=case.panels, store=store):
+            case_error = InvalidGenePanelsError(case_index=case_index, panels=invalid_panels)
+            errors.append(case_error)
+    return errors
+
+
+def validate_subject_ids_unique(
+    order: RarediseaseOrder, store: Store, **kwargs
+) -> list[SubjectIdRepeatedError]:
+    errors: list[SubjectIdRepeatedError] = []
+    for case_index, case in order.enumerated_new_cases:
+        subject_ids: list[str] = get_subject_ids(case=case, store=store)
+        counter_subject_ids = Counter(subject_ids)
+        repeated_subject_ids = [
+            subject_id for subject_id in counter_subject_ids if counter_subject_ids[subject_id] > 1
+        ]
+        if repeated_subject_ids:
+            error = SubjectIdRepeatedError(
+                case_index=case_index,
+                message=f"Case cannot contain multiple samples with the same subject id. Repeated subject_ids: {repeated_subject_ids}",
+            )
             errors.append(error)
     return errors

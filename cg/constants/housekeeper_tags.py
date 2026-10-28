@@ -23,20 +23,21 @@ class AlignmentFileTag(StrEnum):
 class ScoutTag(StrEnum):
     """Tags for Scout."""
 
-    ARCHIVED: str = "archived"
-    SOLVED: str = "solved"
+    ARCHIVED = "archived"
+    SOLVED = "solved"
 
 
 class SequencingFileTag(StrEnum):
     """Tags for sequencing files."""
 
-    CGSTATS_LOG: str = "log"
-    DEMUX_LOG: str = "log"
-    FASTQ: str = "fastq"
-    RUN_PARAMETERS: str = "run-parameters"
-    SAMPLE_SHEET: str = "samplesheet"
-    SPRING: str = "spring"
-    SPRING_METADATA: str = "spring-metadata"
+    BAM = "bam"
+    CGSTATS_LOG = "log"
+    DEMUX_LOG = "log"
+    FASTQ = "fastq"
+    RUN_PARAMETERS = "run-parameters"
+    SAMPLE_SHEET = "samplesheet"
+    SPRING = "spring"
+    SPRING_METADATA = "spring-metadata"
 
 
 HK_MULTIQC_HTML_TAG = "multiqc-html"
@@ -44,6 +45,8 @@ HK_MULTIQC_HTML_TAG = "multiqc-html"
 HK_FASTQ_TAGS = [SequencingFileTag.FASTQ]
 
 HK_DELIVERY_REPORT_TAG = "delivery-report"
+
+EXTERNAL_DATA_TAG = "external"
 
 
 class HermesFileTag(StrEnum):
@@ -93,10 +96,6 @@ class HkMipAnalysisTag:
     SAMPLE_INFO: list[str] = ["sample-info"]
 
 
-class NFAnalysisTags:
-    MANIFEST: str = "manifest"
-
-
 class BalsamicAnalysisTag:
     CONFIG: list[str] = ["balsamic-config"]
     QC_METRICS: list[str] = ["qc-metrics", "deliverable"]
@@ -107,17 +106,9 @@ class NalloAnalysisTag:
     PARAPHASE: str = "paraphase"
 
 
-class HkAnalysisMetricsTag:
-    QC_METRICS: set[str] = {"qc-metrics", "deliverable"}
-
-
 class GensAnalysisTag:
     COVERAGE: list[str] = ["gens", "coverage", "bed"]
     FRACSNP: list[str] = ["gens", "fracsnp", "bed"]
-
-
-class GenotypeAnalysisTag:
-    GENOTYPE: str = "genotype"
 
 
 class BalsamicProtectedTags:
@@ -226,6 +217,9 @@ WORKFLOW_PROTECTED_TAGS = {
         ["multiqc-json"],
         ["gisaid-log"],
         ["gisaid-csv"],
+    ],
+    Workflow.NALLO: [
+        [HermesFileTag.LONG_TERM_STORAGE],
     ],
     Workflow.RAREDISEASE: [
         [HermesFileTag.LONG_TERM_STORAGE],

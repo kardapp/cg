@@ -1,5 +1,6 @@
 from decimal import Decimal
 from json import JSONEncoder
+from pathlib import Path
 
 from flask_admin import Admin
 from flask_cors import CORS
@@ -8,8 +9,10 @@ from flask_wtf.csrf import CSRFProtect
 from cg.apps.lims import LimsAPI
 from cg.apps.tb.api import TrailblazerAPI
 from cg.clients.freshdesk.freshdesk_client import FreshdeskClient
+from cg.models.cg_config import NatsConfig
 from cg.server.app_config import app_config
 from cg.services.delivery_message.delivery_message_service import DeliveryMessageService
+from cg.services.mark_as_delivered_service import MarkAsDeliveredService
 from cg.services.orders.order_service.order_service import OrderService
 from cg.services.orders.order_summary_service.order_summary_service import OrderSummaryService
 from cg.services.orders.storing.service_registry import (
@@ -27,7 +30,6 @@ from cg.services.web_services.case.service import CaseWebService
 from cg.services.web_services.sample.service import SampleService
 from cg.store.database import initialize_database
 from cg.store.store import Store
-from cg.server.app_config import app_config
 
 
 class FlaskLims(LimsAPI):
@@ -80,6 +82,16 @@ class AnalysisClient(TrailblazerAPI):
         super(AnalysisClient, self).__init__(config)
 
 
+nats_config = NatsConfig(
+    ca_cert_path=app_config.nats_ca_cert_path,
+    client_cert_path=app_config.nats_client_cert_path,
+    client_key_path=app_config.nats_client_key_path,
+    nats_binary_path=Path(""),
+    server=app_config.nats_server,
+    stream=app_config.nats_stream,
+    token_path=app_config.nats_token_path,
+)
+
 cors = CORS(resources={r"/api/*": {"origins": "*"}}, supports_credentials=True)
 csrf = CSRFProtect()
 db = FlaskStore()
@@ -94,13 +106,14 @@ case_service = CaseWebService(store=db)
 order_service = OrderService(store=db, status_service=summary_service)
 pacbio_sequencing_runs_service = PacbioSequencingRunsService(db)
 sample_service = SampleService(db)
+mark_as_delivered_service = MarkAsDeliveredService(status_db=db, trailblazer_api=analysis_client)
 sample_run_metrics_service = SampleRunMetricsService(db)
 storing_service_registry: StoringServiceRegistry = setup_storing_service_registry(
     lims=lims,
     status_db=db,
 )
 
-order_validation_service = OrderValidationService(store=db)
+order_validation_service = OrderValidationService(lims_api=lims, store=db)
 freshdesk_client = FreshdeskClient(
     base_url=app_config.freshdesk_url, api_key=app_config.freshdesk_api_key
 )

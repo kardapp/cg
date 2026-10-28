@@ -1,14 +1,20 @@
 import logging
+from datetime import datetime
 
 import pytest
 from sqlalchemy.exc import MultipleResultsFound
 from sqlalchemy.orm import Query
 
 from cg.constants import SequencingRunDataAvailability
-from cg.constants.constants import CaseActions, Workflow
+from cg.constants.constants import BedVersionGenomeVersion, CaseActions, Workflow
 from cg.constants.sequencing import SeqLibraryPrepCategory
 from cg.constants.subject import PhenotypeStatus
-from cg.exc import BedVersionNotFoundError, CgError
+from cg.exc import (
+    ApplicationTagNotFoundError,
+    BedVersionNotFoundError,
+    CgError,
+    ExternalSampleNotFoundError,
+)
 from cg.services.orders.order_service.models import OrderQueryParams
 from cg.store.models import (
     Analysis,
@@ -21,6 +27,7 @@ from cg.store.models import (
     CaseSample,
     Collaboration,
     Customer,
+    ExternalSample,
     IlluminaSampleSequencingMetrics,
     IlluminaSequencingRun,
     Invoice,
@@ -115,11 +122,22 @@ def test_get_application_by_tag(microbial_store: Store, tag: str = "MWRNXTR003")
 
     # GIVEN a store with application records
 
-    # WHEN getting the query for the flow cells
+    # WHEN getting an application by tag
     application: Application = microbial_store.get_application_by_tag(tag=tag)
 
-    # THEN return a application with the supplied application tag
+    # THEN return an application with the supplied application tag
     assert application.tag == tag
+
+
+def test_get_application_by_tag_strict_fails(microbial_store: Store, tag: str = "SILLYAPPTAG01"):
+    """Test function to return the application by tag, strict."""
+
+    # GIVEN a store with application records
+
+    # WHEN strictly getting an application by a tag with no application
+    with pytest.raises(ApplicationTagNotFoundError):
+        # THEN the correct error is raised
+        microbial_store.get_application_by_tag_strict(tag=tag)
 
 
 def test_get_applications_is_not_archived(
@@ -145,7 +163,9 @@ def test_case_in_uploaded_observations(helpers: StoreHelpers, sample_store: Stor
     analysis: Analysis = helpers.add_analysis(store=sample_store, workflow=Workflow.MIP_DNA)
     analysis.case.customer.loqus_upload = True
     sample: Sample = helpers.add_sample(sample_store, loqusdb_id=loqusdb_id)
-    link = sample_store.relate_sample(analysis.case, sample, PhenotypeStatus.UNKNOWN)
+    link = sample_store.relate_sample(
+        analysis.case, sample, PhenotypeStatus.UNKNOWN, should_deliver_sample=True
+    )
     sample_store.session.add(link)
     assert analysis.case.analyses
     for link in analysis.case.links:
@@ -165,7 +185,9 @@ def test_case_not_in_uploaded_observations(helpers: StoreHelpers, sample_store: 
     analysis: Analysis = helpers.add_analysis(store=sample_store, workflow=Workflow.MIP_DNA)
     analysis.case.customer.loqus_upload = True
     sample: Sample = helpers.add_sample(sample_store)
-    link = sample_store.relate_sample(analysis.case, sample, PhenotypeStatus.UNKNOWN)
+    link = sample_store.relate_sample(
+        analysis.case, sample, PhenotypeStatus.UNKNOWN, should_deliver_sample=True
+    )
     sample_store.session.add(link)
     assert analysis.case.analyses
     for link in analysis.case.links:
@@ -185,7 +207,9 @@ def test_case_in_observations_to_upload(helpers: StoreHelpers, sample_store: Sto
     analysis: Analysis = helpers.add_analysis(store=sample_store, workflow=Workflow.MIP_DNA)
     analysis.case.customer.loqus_upload = True
     sample: Sample = helpers.add_sample(sample_store)
-    link = sample_store.relate_sample(analysis.case, sample, PhenotypeStatus.UNKNOWN)
+    link = sample_store.relate_sample(
+        analysis.case, sample, PhenotypeStatus.UNKNOWN, should_deliver_sample=True
+    )
     sample_store.session.add(link)
     assert analysis.case.analyses
     for link in analysis.case.links:
@@ -207,7 +231,9 @@ def test_case_not_in_observations_to_upload(
     analysis: Analysis = helpers.add_analysis(store=sample_store, workflow=Workflow.MIP_DNA)
     analysis.case.customer.loqus_upload = True
     sample: Sample = helpers.add_sample(sample_store, loqusdb_id=loqusdb_id)
-    link = sample_store.relate_sample(analysis.case, sample, PhenotypeStatus.UNKNOWN)
+    link = sample_store.relate_sample(
+        analysis.case, sample, PhenotypeStatus.UNKNOWN, should_deliver_sample=True
+    )
     sample_store.session.add(link)
     assert analysis.case.analyses
     for link in analysis.case.links:
@@ -348,56 +374,75 @@ def test_get_bed_version_by_file_name(base_store: Store, bed_version_file_name: 
     assert bed_version.filename == bed_version_file_name
 
 
-def test_get_bed_version_by_short_name(base_store: Store, bed_version_short_name: str):
-    """Test function to return the bed version by short name."""
-
-    # GIVEN a store with bed versions records
-
-    # WHEN getting the query for the bed versions
-    bed_version: BedVersion = base_store.get_bed_version_by_short_name(
-        bed_version_short_name=bed_version_short_name
+def test_get_bed_version_by_short_name_and_genome_version_strict_success(
+    store: Store, helpers: StoreHelpers
+):
+    # GIVEN a store with three bed versions
+    bed_hg19: Bed = helpers.add_bed("bed_hg19")
+    bed_hg38: Bed = helpers.add_bed("bed_hg38")
+    bed_version_with_different_genome_version: BedVersion = helpers.add_bed_version(
+        bed=bed_hg19, version=1, filename="bed_hg19.bed", shortname="b"
+    )
+    bed_version_with_different_genome_version.genome_version = BedVersionGenomeVersion.HG19
+    bed_version_with_different_shortname: BedVersion = helpers.add_bed_version(
+        bed=bed_hg38, version=2, filename="bed_hg38.bed", shortname="a"
+    )
+    bed_version_with_different_shortname.genome_version = BedVersionGenomeVersion.HG38
+    bed_version_to_fetch: BedVersion = helpers.add_bed_version(
+        bed=bed_hg38, version=1, filename="bed_hg38.bed", shortname="b"
+    )
+    bed_version_to_fetch.genome_version = BedVersionGenomeVersion.HG38
+    store.add_multiple_items_to_store(
+        [
+            bed_version_with_different_genome_version,
+            bed_version_with_different_shortname,
+            bed_version_to_fetch,
+        ]
     )
 
-    # THEN return a bed version with the supplied bed version short name
-    assert bed_version.shortname == bed_version_short_name
+    # WHEN getting the bed version of hg38 genome version
+    bed_version = store.get_bed_version_by_short_name_and_genome_version_strict(
+        short_name="b", genome_version=BedVersionGenomeVersion.HG38
+    )
+
+    # THEN the expected bed version is returned
+    assert bed_version == bed_version_to_fetch
 
 
-def test_get_bed_version_by_short_name_strict_fail(base_store: Store):
-    # GIVEN a store
+def test_get_bed_version_by_short_name_and_genome_version_strict_no_result_found(store: Store):
+    # GIVEN a store without bed versions
+    assert store._get_query(table=BedVersion).count() == 0
 
-    # GIVEN a bed version shortname that does not exist
-    short_name = "fake_short_name"
-
-    # WHEN fetching the bed version
-    # THEN an error is raised
+    # WHEN getting a bed version by a short name and a genome version
+    # THEN a BedVersionNotFoundError is raised
     with pytest.raises(BedVersionNotFoundError):
-        base_store.get_bed_version_by_short_name_strict(short_name=short_name)
+        store.get_bed_version_by_short_name_and_genome_version_strict(
+            short_name="short_name", genome_version=BedVersionGenomeVersion.HG19
+        )
 
 
-def test_get_bed_version_by_short_name_strict_multiple_fail(base_store: Store):
-    # GIVEN a store that contains two bed versions with the same short name
-    bed: Bed = base_store.add_bed(name="bed")
-    base_store.add_bed_version(bed=bed, version=1, filename="one.txt", shortname="short_name")
-    base_store.add_bed_version(bed=bed, version=2, filename="two.txt", shortname="short_name")
-    base_store.add_item_to_store(bed)
-    base_store.commit_to_store()
+def test_get_bed_version_by_short_name_and_genome_version_strict_multiple_results_found(
+    store: Store,
+    helpers: StoreHelpers,
+):
+    # GIVEN a store with two bed versions with the same shortname and genome_version
+    bed_hg38: Bed = helpers.add_bed("bed_hg38")
+    bed_version_1: BedVersion = helpers.add_bed_version(
+        bed=bed_hg38, version=2, filename="bed_hg38.bed", shortname="b"
+    )
+    bed_version_1.genome_version = BedVersionGenomeVersion.HG38
+    bed_version_2: BedVersion = helpers.add_bed_version(
+        bed=bed_hg38, version=1, filename="bed_hg38.bed", shortname="b"
+    )
+    bed_version_2.genome_version = BedVersionGenomeVersion.HG38
+    store.add_multiple_items_to_store([bed_version_1, bed_version_2])
 
-    # WHEN fetching the bed version corresponding to the shortname
-    # THEN an error is raised
+    # WHEN getting a bed version by shortname and genome_version
+    # THEN a MultipleResultsFound error is raised
     with pytest.raises(MultipleResultsFound):
-        base_store.get_bed_version_by_short_name_strict(short_name="short_name")
-
-
-def test_get_bed_version_by_short_name_strict_success(base_store: Store):
-    # GIVEN a store that contains one bed version
-    bed: Bed = base_store.add_bed(name="bed")
-    base_store.add_bed_version(bed=bed, version=1, filename="one.txt", shortname="short_name")
-    base_store.add_item_to_store(bed)
-    base_store.commit_to_store()
-
-    # WHEN fetching the bed version corresponding to the shortname
-    # THEN success
-    base_store.get_bed_version_by_short_name_strict(short_name="short_name")
+        store.get_bed_version_by_short_name_and_genome_version_strict(
+            short_name="b", genome_version=BedVersionGenomeVersion.HG38
+        )
 
 
 def test_get_customer_by_internal_id(base_store: Store, customer_id: str):
@@ -976,19 +1021,23 @@ def test_get_pools_by_name_enquiry(store_with_multiple_pools_for_customer: Store
     assert len(pools) == 1
 
 
-def test_get_pools_by_order_enquiry(
-    store_with_multiple_pools_for_customer: Store, pool_order_1: str
-):
+def test_get_pools_by_order_enquiry(store: Store, helpers: StoreHelpers):
     """Test that pools can be fetched from the store by customer id."""
     # GIVEN a database with two pools
+    customer = helpers.ensure_customer(store=store)
+    order_1 = store.add_order(customer=customer, name="order_1", ticket_id=1)
+    order_2 = store.add_order(customer=customer, name="order_2", ticket_id=2)
+    store.add_multiple_items_to_store([order_1, order_2])
+    store.commit_to_store()
+
+    pool_1 = helpers.ensure_pool(store=store, ticket=1)
+    helpers.ensure_pool(store=store, ticket=2)
 
     # WHEN getting pools by customer id
-    pools: list[Pool] = store_with_multiple_pools_for_customer.get_pools_by_order_enquiry(
-        order_enquiry=pool_order_1
-    )
+    pools: list[Pool] = store.get_pools_by_order_enquiry(order_enquiry="order_1")
 
-    # THEN one pool should be returned
-    assert len(pools) == 1
+    # THEN only pool 1 should be returned
+    assert pools == [pool_1]
 
 
 def test_get_pools_to_render_with(
@@ -1003,19 +1052,17 @@ def test_get_pools_to_render_with(
     assert len(pools) == 2
 
 
-def test_get_pools_to_render_with_customer(
-    store_with_multiple_pools_for_customer: Store,
-):
+def test_get_pools_to_render_with_customer(store: Store, helpers: StoreHelpers):
     """Test that pools can be fetched from the store by customer id."""
-    # GIVEN a database with two pools
+    # GIVEN a database with two pools tied to different customers
+    pool_1: Pool = helpers.ensure_pool(store=store, customer_id="cust_to_fetch", name="pool_1")
+    helpers.ensure_pool(store=store, customer_id="cust_to_not_fetch", name="pool_2")
 
-    # WHEN getting pools by customer id
-    pools: list[Pool] = store_with_multiple_pools_for_customer.get_pools_to_render(
-        customers=store_with_multiple_pools_for_customer.get_customers()
-    )
+    # WHEN getting pools using the customer id of the first pool
+    pools: list[Pool] = store.get_pools_to_render(customers=[pool_1.customer])
 
-    # THEN two pools should be returned
-    assert len(pools) == 2
+    # THEN only the first pool should be returned
+    assert pools == [pool_1]
 
 
 def test_get_pools_to_render_with_customer_and_name_enquiry(
@@ -1034,20 +1081,28 @@ def test_get_pools_to_render_with_customer_and_name_enquiry(
     assert len(pools) == 1
 
 
-def test_get_pools_to_render_with_customer_and_order_enquiry(
-    store_with_multiple_pools_for_customer: Store,
-    pool_order_1: str,
-):
+def test_get_pools_to_render_with_customer_and_order_enquiry(store: Store, helpers: StoreHelpers):
     """Test that pools can be fetched from the store by customer id."""
-    # GIVEN a database with two pools
-
-    # WHEN fetching pools by customer id and order enquiry
-    pools: list[Pool] = store_with_multiple_pools_for_customer.get_pools_to_render(
-        customers=store_with_multiple_pools_for_customer.get_customers(), enquiry=pool_order_1
+    # GIVEN a database with two pools belonging to different orders
+    customer_1 = helpers.ensure_customer(
+        store=store, customer_id="customer_id_1", customer_name="customer name 1"
     )
+    customer_2 = helpers.ensure_customer(
+        store=store, customer_id="customer_id_2", customer_name="customer name 2"
+    )
+    order_1 = store.add_order(customer=customer_1, name="order_1", ticket_id=1)
+    order_2 = store.add_order(customer=customer_2, name="order_2", ticket_id=2)
+    store.add_multiple_items_to_store([customer_1, customer_2, order_1, order_2])
+    store.commit_to_store()
 
-    # THEN one pools should be returned
-    assert len(pools) == 1
+    pool_1 = helpers.ensure_pool(store=store, ticket=1)
+    helpers.ensure_pool(store=store, ticket=2)
+
+    # WHEN fetching pools by order enquiry
+    pools: list[Pool] = store.get_pools_to_render(enquiry="order_1")
+
+    # THEN only the first pool should be returned
+    assert pools == [pool_1]
 
 
 def test_get_case_by_name_and_customer_case_found(store_with_multiple_cases_and_samples: Store):
@@ -1278,3 +1333,73 @@ def test_get_orders_mip_dna_and_limit_filter(
 
     # THEN we should get the expected number of orders returned
     assert len(orders) == expected_returned
+
+
+def test_get_external_sample_finds_match(store: Store, helpers: StoreHelpers):
+    # GIVEN a store containing external samples and customers
+    customer_0 = helpers.ensure_customer(store=store, customer_id="cust000")
+    customer_1 = helpers.ensure_customer(store=store, customer_id="cust001")
+    external_sample_1 = ExternalSample(
+        customer_id=customer_0.id, sample_name="sample-name-1", customer_uploaded_at=datetime.now()
+    )
+    external_sample_2 = ExternalSample(
+        customer_id=customer_0.id, sample_name="sample-name-2", customer_uploaded_at=datetime.now()
+    )
+    external_sample_3 = ExternalSample(
+        customer_id=customer_1.id, sample_name="sample-name-1", customer_uploaded_at=datetime.now()
+    )
+    store.add_multiple_items_to_store([external_sample_1, external_sample_2, external_sample_3])
+
+    # WHEN fetching the external sample by customer and sample name
+    fetched_external_sample: ExternalSample | None = store.get_external_sample(
+        customer_id=customer_0.id,
+        sample_name="sample-name-1",
+    )
+
+    # THEN that sample must be returned
+    assert fetched_external_sample == external_sample_1
+
+
+def test_get_external_sample_no_match(store: Store):
+    # GIVEN an empty store
+
+    # WHEN fetching an external sample by customer and sample name
+    fetched_external_sample: ExternalSample | None = store.get_external_sample(
+        customer_id=1,
+        sample_name="sample-name-1",
+    )
+
+    # THEN None should be returned
+    assert fetched_external_sample is None
+
+
+def test_get_external_sample_strict_success(store: Store, helpers: StoreHelpers):
+    # GIVEN a store containing a matching external sample for a customer
+    customer = helpers.ensure_customer(store=store, customer_id="cust000")
+    external_sample = ExternalSample(
+        customer_id=customer.id,
+        sample_name="sample-name-1",
+        customer_uploaded_at=datetime.now(),
+    )
+    store.add_item_to_store(item=external_sample)
+
+    # WHEN fetching the external sample strictly by customer and sample name
+    fetched_external_sample: ExternalSample = store.get_external_sample_strict(
+        customer_id=customer.id,
+        sample_name="sample-name-1",
+    )
+
+    # THEN the matching external sample should be returned
+    assert fetched_external_sample == external_sample
+
+
+def test_get_external_sample_strict_external_sample_not_found(store: Store):
+    # GIVEN an empty store
+
+    # WHEN fetching an external sample strictly by customer and sample name
+    # THEN an ExternalSampleNotFoundError should be raised
+    with pytest.raises(ExternalSampleNotFoundError):
+        store.get_external_sample_strict(
+            customer_id=1,
+            sample_name="sample-name-1",
+        )

@@ -50,8 +50,8 @@ FLOWCELL_Q30_THRESHOLD = {
 class Variants(StrEnum):
     """Type of variants."""
 
-    SNV: str = "snv"
-    SV: str = "sv"
+    SNV = "snv"
+    SV = "sv"
 
 
 class RecordType(StrEnum):
@@ -60,8 +60,8 @@ class RecordType(StrEnum):
 
 
 class SequencingPlatform(StrEnum):
-    ILLUMINA: str = "ILLUMINA"
-    OXFORD_NANOPORE: str = "OXFORD_NANOPORE"
+    ILLUMINA = "ILLUMINA"
+    OXFORD_NANOPORE = "OXFORD_NANOPORE"
 
 
 class SeqLibraryPrepCategory(StrEnum):
@@ -79,3 +79,9 @@ DNA_PREP_CATEGORIES: list[SeqLibraryPrepCategory] = [
     SeqLibraryPrepCategory.TARGETED_GENOME_SEQUENCING,
     SeqLibraryPrepCategory.WHOLE_EXOME_SEQUENCING,
 ]
+
+
+class ReadType(StrEnum):
+    LONG_READ = "long-read"
+    SHORT_READ = "short-read"
+    OPTICAL_MAPPING = "optical-mapping"

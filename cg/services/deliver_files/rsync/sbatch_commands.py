@@ -12,6 +12,14 @@ RSYNC_CONTENTS_COMMAND = """
 rsync -rvL {source_path}/ {destination_path}
 """
 
+RSYNC_INCLUDE_OPTION = """
+ --include='{include_pattern}'
+"""
+
+RSYNC_EXCLUDE_OPTION = """
+ --exclude='{exclude_pattern}'
+"""
+
 COVID_RSYNC = """
 rsync -rvL {source_path} {destination_path}
 rsync -rvL --chmod=777 {covid_report_path} {covid_destination_path}
@@ -27,4 +35,9 @@ echo "Create inbox failed"
 
 ERROR_RSYNC_FUNCTION = """
 echo "Rsync failed"
+"""
+
+ERROR_TRANSFER_TO_CLUSTER_FUNCTION = """
+echo "Rsync failed"
+    {failure_event}
 """

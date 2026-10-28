@@ -137,3 +137,13 @@ class CaptureKitMissingError(SampleError):
 class CaptureKitInvalidError(SampleError):
     field: str = "capture_kit"
     message: str = "Bait set must be valid"
+
+
+class MissingSourceCommentError(SampleError):
+    field: str = "source_comment"
+    message: str = "Other source must be filled in when source is 'other'"
+
+
+class SexUnknownWarning(SampleError):
+    field: str = "warnings"
+    message: str = "This sample has unknown sex. This may delay delivery and affect the results."

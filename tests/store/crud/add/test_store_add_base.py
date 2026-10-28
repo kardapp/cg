@@ -2,17 +2,24 @@ from datetime import datetime as dt
 
 import pytest
 
+from cg.constants import Priority
+from cg.constants.devices import RevioNames
 from cg.constants.subject import Sex
+from cg.exc import PacbioSequencingRunAlreadyExistsError
 from cg.services.illumina.data_transfer.models import IlluminaFlowCellDTO
-from cg.store.exc import EntryNotFoundError, EntryAlreadyExistsError
+from cg.services.run_devices.pacbio.data_transfer_service.dto import PacBioSequencingRunDTO
+from cg.store.exc import EntryAlreadyExistsError, EntryNotFoundError
 from cg.store.models import (
     ApplicationVersion,
     Collaboration,
     Customer,
+    ExternalSample,
+    Order,
     Organism,
+    PacbioSequencingRun,
+    Pool,
     Sample,
     User,
-    IlluminaFlowCell,
 )
 from cg.store.store import Store
 
@@ -84,8 +91,8 @@ def test_add_microbial_sample(base_store: Store, helpers):
     base_store.session.commit()
 
     # THEN it should be stored in the database
-    assert sample_query.first() == new_sample
-    stored_microbial_sample = sample_query.first()
+    assert sample_query.one() == new_sample
+    stored_microbial_sample = sample_query.one()
     assert stored_microbial_sample.name == name
     assert stored_microbial_sample.internal_id == internal_id
     assert stored_microbial_sample.reference_genome == reference_genome
@@ -94,9 +101,26 @@ def test_add_microbial_sample(base_store: Store, helpers):
     assert stored_microbial_sample.organism == organism
 
 
+def test_add_sample_connected_to_pool(store: Store):
+    # GIVEN a pool
+    pool = Pool(id=1)
+
+    # WHEN adding a sample
+    sample = store.add_sample(
+        name="sample-name",
+        sex=Sex.FEMALE,
+        internal_id="sample_name",
+        priority=Priority.standard,
+        pool=pool,
+    )
+
+    # THEN the sample should be connected to the pool
+    assert sample.pool == pool
+
+
 def test_add_pool(rml_pool_store: Store):
     """Tests whether new pools are invoiced as default."""
-    # GIVEN a valid customer and a valid application_version
+    # GIVEN a customer, an application_version and an order
     customer: Customer = rml_pool_store.get_customers()[0]
     application = rml_pool_store.get_application_by_tag(tag="RMLP05R800")
     app_version = (
@@ -104,14 +128,15 @@ def test_add_pool(rml_pool_store: Store):
         .filter(ApplicationVersion.application_id == application.id)
         .first()
     )
+    order: Order = rml_pool_store.get_order_by_ticket_id_strict(123456)
 
     # WHEN adding a new pool
     new_pool = rml_pool_store.add_pool(
         customer=customer,
         name="pool2",
-        order="123456",
         ordered=dt.now(),
         application_version=app_version,
+        order=order,
     )
 
     rml_pool_store.session.add(new_pool)
@@ -123,7 +148,6 @@ def test_add_pool(rml_pool_store: Store):
 
 def test_add_illumina_flow_cell(
     illumina_flow_cell_dto: IlluminaFlowCellDTO,
-    illumina_flow_cell: IlluminaFlowCell,
     illumina_flow_cell_internal_id: str,
     store: Store,
 ):
@@ -153,3 +177,72 @@ def test_add_illumina_flow_cell_already_exists(
     # THEN a EntryAlreadyExistsError should be raised
     with pytest.raises(EntryAlreadyExistsError):
         store.add_illumina_flow_cell(illumina_flow_cell_dto)
+
+
+def test_create_pacbio_sequencing_run(store: Store):
+    # GIVEN a Store without Pacbio sequencing runs
+    assert not store._get_query(table=PacbioSequencingRun).all()
+
+    # GIVEN a PacBioSequencingRunDTO
+    pacbio_sequencing_run_dto = PacBioSequencingRunDTO(
+        instrument_name=RevioNames.WILMA,
+        run_id="r123_123_123",
+        run_name="run-name",
+        unique_id="unique-id",
+    )
+
+    # WHEN creating a Pacbio sequencing run in Store
+    store.create_pacbio_sequencing_run(pacbio_sequencing_run_dto)
+
+    # THEN the PacbioSequencingRun exists and has the correct attributes
+    pacbio_sequencing_run: PacbioSequencingRun = store._get_query(table=PacbioSequencingRun).one()
+    assert pacbio_sequencing_run.instrument_name == RevioNames.WILMA
+    assert pacbio_sequencing_run.run_id == "r123_123_123"
+
+
+def test_create_pacbio_sequencing_run_already_exists(store: Store):
+    # GIVEN a Store with a Pacbio sequencing run
+    pacbio_sequencing_run_dto = PacBioSequencingRunDTO(
+        instrument_name=RevioNames.WILMA,
+        run_id="r123_123_123",
+        run_name="run-name",
+        unique_id="unique-id",
+    )
+    store.create_pacbio_sequencing_run(pacbio_sequencing_run_dto)
+    store.commit_to_store()
+    assert store._get_query(table=PacbioSequencingRun).one()
+
+    # GIVEN a PacBioSequencingRunDTO
+    pacbio_sequencing_run_dto = PacBioSequencingRunDTO(
+        instrument_name=RevioNames.WILMA,
+        run_id="r123_123_123",
+        run_name="run-name",
+        unique_id="unique-id",
+    )
+
+    # WHEN creating the same Pacbio sequencing run in Store
+    # THEN a PacbioSequencingRunAlreadyExistsError should be raised
+    with pytest.raises(PacbioSequencingRunAlreadyExistsError):
+        store.create_pacbio_sequencing_run(pacbio_sequencing_run_dto)
+
+
+def test_add_external_sample(store: Store):
+    # GIVEN a store with a customer
+    customer: Customer = Customer(id=1)
+    store.add_item_to_store(customer)
+
+    # GIVEN customer_id, sample_name and customer_uploaded_at
+    customer_id, sample_name, customer_uploaded_at = 1, "sample-name", dt.now()
+
+    # WHEN calling add_external_sample
+    external_sample: ExternalSample = store.add_external_sample(
+        customer_id=customer_id, sample_name=sample_name, customer_uploaded_at=customer_uploaded_at
+    )
+
+    # THEN the external sample will have the correct fields
+    assert external_sample.customer_id == customer.id
+    assert external_sample.sample_name == sample_name
+    assert external_sample.customer_uploaded_at == customer_uploaded_at
+
+    # THEN an external sample should have been added to the session
+    assert external_sample in store.session

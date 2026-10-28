@@ -8,13 +8,14 @@ from housekeeper.store.models import File, Version
 
 from cg.apps.housekeeper.hk import HousekeeperAPI
 from cg.apps.scout.scoutapi import ScoutAPI
-from cg.cli.upload.utils import get_scout_api, suggest_cases_to_upload
+from cg.cli.upload.utils import get_scout_api_by_case, suggest_cases_to_upload
 from cg.constants import Workflow
 from cg.constants.cli_options import DRY_RUN
 from cg.constants.constants import FileFormat
 from cg.constants.scout import ScoutCustomCaseReportTags
 from cg.io.controller import WriteStream
 from cg.meta.upload.scout.uploadscoutapi import UploadScoutAPI
+from cg.meta.upload.tomte.tomte import TomteUploadAPI
 from cg.meta.upload.upload_api import UploadAPI
 from cg.meta.workflow.balsamic import BalsamicAnalysisAPI
 from cg.meta.workflow.balsamic_umi import BalsamicUmiAnalysisAPI
@@ -22,7 +23,7 @@ from cg.meta.workflow.mip_dna import MipDNAAnalysisAPI
 from cg.meta.workflow.mip_rna import MipRNAAnalysisAPI
 from cg.meta.workflow.nallo import NalloAnalysisAPI
 from cg.meta.workflow.raredisease import RarediseaseAnalysisAPI
-from cg.meta.workflow.rnafusion import RnafusionAnalysisAPI
+from cg.meta.workflow.rnafusion_analysis_api import RnafusionAnalysisAPI
 from cg.meta.workflow.tomte import TomteAnalysisAPI
 from cg.models.cg_config import CGConfig
 from cg.models.scout.scout_load_config import ScoutLoadConfig
@@ -73,7 +74,7 @@ def create_scout_load_config(context: CGConfig, case_id: str, print_console: boo
     status_db: Store = context.status_db
 
     LOG.info("Fetching family object")
-    case: Case = status_db.get_case_by_internal_id(internal_id=case_id)
+    case: Case = status_db.get_case_by_internal_id_strict(internal_id=case_id)
 
     if not case.analyses:
         LOG.warning(f"Could not find analyses for {case_id}")
@@ -145,7 +146,7 @@ def upload_case_to_scout(context: CGConfig, re_upload: bool, dry_run: bool, case
     LOG.info("----------------- UPLOAD -----------------------")
 
     housekeeper_api: HousekeeperAPI = context.housekeeper_api
-    scout_api: ScoutAPI = get_scout_api(cg_config=context, case_id=case_id)
+    scout_api: ScoutAPI = get_scout_api_by_case(cg_config=context, case_id=case_id)
 
     tag_name: str = UploadScoutAPI.get_load_config_tag()
     version: Version = housekeeper_api.last_version(bundle=case_id)
@@ -221,7 +222,9 @@ def upload_tomte_to_scout(
 def upload_rna_alignment_file_to_scout(context: CGConfig, case_id: str, dry_run: bool) -> None:
     """Upload RNA alignment file for a case to Scout."""
     LOG.info("----------------- UPLOAD RNA ALIGNMENT FILE TO SCOUT -----------------------")
-    scout_upload_api: UploadScoutAPI = context.meta_apis["upload_api"].scout_upload_api
+    upload_api = TomteUploadAPI(context)
+    context.meta_apis["upload_api"] = upload_api
+    scout_upload_api: UploadScoutAPI = upload_api.scout_upload_api
     scout_upload_api.upload_rna_alignment_file(case_id=case_id, dry_run=dry_run)
 
 
@@ -236,8 +239,9 @@ def upload_rna_fusion_report_to_scout(
     """Upload fusion report file for a case to Scout."""
 
     LOG.info("----------------- UPLOAD RNA FUSION REPORT TO SCOUT -----------------------")
-
-    scout_upload_api: UploadScoutAPI = context.meta_apis["upload_api"].scout_upload_api
+    upload_api = TomteUploadAPI(context)
+    context.meta_apis["upload_api"] = upload_api
+    scout_upload_api: UploadScoutAPI = upload_api.scout_upload_api
     scout_upload_api.upload_fusion_report_to_scout(
         dry_run=dry_run, research=research, case_id=case_id
     )
@@ -252,7 +256,9 @@ def upload_rna_delivery_report_to_scout(context: CGConfig, dry_run: bool, case_i
 
     LOG.info("----------------- UPLOAD RNA DELIVERY REPORT TO SCOUT -----------------------")
 
-    scout_upload_api: UploadScoutAPI = context.meta_apis["upload_api"].scout_upload_api
+    upload_api = TomteUploadAPI(context)
+    context.meta_apis["upload_api"] = upload_api
+    scout_upload_api: UploadScoutAPI = upload_api.scout_upload_api
     scout_upload_api.upload_rna_delivery_report_to_scout(dry_run=dry_run, case_id=case_id)
 
 
@@ -264,8 +270,9 @@ def upload_rna_junctions_to_scout(context: CGConfig, case_id: str, dry_run: bool
     """Upload RNA junctions splice files to Scout."""
     LOG.info("----------------- UPLOAD RNA JUNCTIONS TO SCOUT -----------------------")
 
-    scout_upload_api: UploadScoutAPI = context.meta_apis["upload_api"].scout_upload_api
-
+    upload_api = TomteUploadAPI(context)
+    context.meta_apis["upload_api"] = upload_api
+    scout_upload_api: UploadScoutAPI = upload_api.scout_upload_api
     scout_upload_api.upload_rna_junctions_to_scout(dry_run=dry_run, case_id=case_id)
 
 
@@ -277,7 +284,9 @@ def upload_rna_omics_to_scout(context: CGConfig, case_id: str, dry_run: bool) ->
     """Upload RNA omics files to Scout."""
     LOG.info("----------------- UPLOAD RNA OMICS TO SCOUT -----------------------")
 
-    scout_upload_api: UploadScoutAPI = context.meta_apis["upload_api"].scout_upload_api
+    upload_api = TomteUploadAPI(context)
+    context.meta_apis["upload_api"] = upload_api
+    scout_upload_api: UploadScoutAPI = upload_api.scout_upload_api
     scout_upload_api.upload_rna_omics_to_scout(dry_run=dry_run, case_id=case_id)
 
 
@@ -289,7 +298,9 @@ def upload_multiqc_to_scout(context: CGConfig, case_id: str, dry_run: bool) -> N
     """Upload multiqc report to Scout."""
     LOG.info("----------------- UPLOAD MULTIQC TO SCOUT -----------------------")
 
-    scout_upload_api: UploadScoutAPI = context.meta_apis["upload_api"].scout_upload_api
+    upload_api = TomteUploadAPI(context)
+    context.meta_apis["upload_api"] = upload_api
+    scout_upload_api: UploadScoutAPI = upload_api.scout_upload_api
     status_db: Store = context.status_db
     case: Case = status_db.get_case_by_internal_id(internal_id=case_id)
     scout_report_type, multiqc_report = scout_upload_api.get_multiqc_html_report(

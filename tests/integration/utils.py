@@ -7,11 +7,9 @@ from housekeeper.store.models import Bundle, Version
 from housekeeper.store.store import Store as HousekeeperStore
 from pytest_httpserver import HTTPServer
 
-from cg.apps.environ import environ_email
-from cg.constants.constants import Workflow
 from cg.constants.housekeeper_tags import AlignmentFileTag, SequencingFileTag
 from cg.constants.tb import AnalysisType
-from cg.store.models import Case, IlluminaFlowCell, IlluminaSequencingRun, Sample
+from cg.store.models import IlluminaFlowCell, IlluminaSequencingRun, Sample
 from cg.store.store import Store
 from tests.store_helpers import StoreHelpers
 
@@ -167,58 +165,6 @@ def copy_integration_test_file(from_path: Path, to_path: Path):
     return True
 
 
-def expect_to_get_latest_analysis_with_empty_response_from_trailblazer(
-    trailblazer_server: HTTPServer, case_id: str
-):
-    trailblazer_server.expect_request(
-        "/trailblazer/get-latest-analysis", data='{"case_id": "' + case_id + '"}'
-    ).respond_with_json(None)
-
-
-def expect_to_add_pending_analysis_to_trailblazer(
-    trailblazer_server: HTTPServer,
-    case: Case,
-    ticket_id: int,
-    out_dir: Path,
-    config_path: Path,
-    analysis_type: AnalysisType,
-    workflow: Workflow,
-    tower_workflow_id: str | None = None,
-    workflow_manager: str = "slurm",
-):
-    trailblazer_server.expect_request(
-        "/trailblazer/add-pending-analysis",
-        data=b'{"case_id": "%(case_id)s", "email": "%(email)s", "type": "%(type)s", '
-        b'"config_path": "%(config_path)s",'
-        b' "order_id": 1, "out_dir": "%(out_dir)s", '
-        b'"priority": "normal", "workflow": "%(workflow)s", "ticket": "%(ticket_id)s", '
-        b'"workflow_manager": "%(workflow_manager)s", "tower_workflow_id": %(tower_workflow_id)s, "is_hidden": true}'
-        % {
-            b"email": environ_email().encode(),
-            b"type": str(analysis_type).encode(),
-            b"case_id": case.internal_id.encode(),
-            b"ticket_id": str(ticket_id).encode(),
-            b"tower_workflow_id": (
-                f'"{tower_workflow_id}"' if tower_workflow_id else "null"
-            ).encode(),
-            b"out_dir": str(out_dir).encode(),
-            b"config_path": str(config_path).encode(),
-            b"workflow": str(workflow).upper().encode(),
-            b"workflow_manager": str(workflow_manager).encode(),
-        },
-        method="POST",
-    ).respond_with_json(
-        {
-            "id": "1",
-            "logged_at": "",
-            "started_at": "",
-            "completed_at": "",
-            "out_dir": "out/dir",
-            "config_path": "config/path",
-        }
-    )
-
-
 def expect_lims_sample_request(lims_server: HTTPServer, sample: Sample, bed_name: str):
     lims_server.expect_request(f"/lims/api/v2/samples/{sample.internal_id}").respond_with_data(
         f"""<smp:sample xmlns:udf="http://genologics.com/ri/userdefined" xmlns:ri="http://genologics.com/ri" xmlns:file="http://genologics.com/ri/file" xmlns:smp="http://genologics.com/ri/sample" uri="http://127.0.0.1:8000/api/v2/samples/ACC0001A1" limsid="ACC0001A1">
@@ -254,4 +200,56 @@ def expect_lims_sample_request(lims_server: HTTPServer, sample: Sample, bed_name
 <udf:field type="String" name="Capture Library version">Agilent Sureselect V5</udf:field>
 </smp:sample>""",
         content_type="application/xml",
+    )
+
+
+def expect_lims_sample_and_project(httpserver: HTTPServer, sample: Sample) -> None:
+    """Register httpserver handlers for the LIMS sample and its project.
+
+    The genologics library lazily fetches linked resources (the project) using the absolute
+    URI embedded in the sample XML. We therefore:
+    1. Return a sample XML where the project URI points back to the test httpserver.
+    2. Register a minimal project handler so the lazy load succeeds.
+    """
+    lims_base: str = f"http://{httpserver.host}:{httpserver.port}/lims"
+
+    project_uri: str = f"{lims_base}/api/v2/projects/ACC0001"
+
+    sample_xml: str = f"""<smp:sample
+        xmlns:udf="http://genologics.com/ri/userdefined"
+        xmlns:ri="http://genologics.com/ri"
+        xmlns:file="http://genologics.com/ri/file"
+        xmlns:smp="http://genologics.com/ri/sample"
+        uri="{lims_base}/api/v2/samples/{sample.internal_id}"
+        limsid="{sample.internal_id}">
+      <name>sample-name</name>
+      <date-received>2017-05-20</date-received>
+      <project limsid="ACC0001" uri="{project_uri}"/>
+      <udf:field type="String" name="customer">cust000</udf:field>
+      <udf:field type="String" name="familyID">F0000001</udf:field>
+      <udf:field type="String" name="Gender">M</udf:field>
+      <udf:field type="String" name="priority">standard</udf:field>
+      <udf:field type="String" name="Source">blood</udf:field>
+      <udf:field type="String" name="Status">unaffected</udf:field>
+      <udf:field type="String" name="Gene List">OMIM-AUTO</udf:field>
+      <udf:field type="String" name="Data Analysis">scout</udf:field>
+      <udf:field type="String" name="Sequencing Analysis">EXXCUSR000</udf:field>
+      <udf:field type="String" name="Application Tag Version">1</udf:field>
+      <udf:field type="String" name="Bait Set">NA</udf:field>
+    </smp:sample>"""
+
+    project_xml: str = f"""<prj:project
+        xmlns:prj="http://genologics.com/ri/project"
+        limsid="ACC0001"
+        uri="{project_uri}">
+      <name>Test Project</name>
+      <open-date>2017-05-20</open-date>
+    </prj:project>"""
+
+    httpserver.expect_request(f"/lims/api/v2/samples/{sample.internal_id}").respond_with_data(
+        sample_xml, content_type="application/xml"
+    )
+
+    httpserver.expect_request("/lims/api/v2/projects/ACC0001").respond_with_data(
+        project_xml, content_type="application/xml"
     )

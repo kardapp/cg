@@ -98,6 +98,7 @@ class SmrtlinkDatasetsMetrics(BaseModel):
     cell_index: int = Field(..., alias=SmrtLinkDatabasesAliases.CELL_INDEX)
     path: str = Field(..., alias=SmrtLinkDatabasesAliases.PATH)
     plate: int
+    instrument_name: str = Field(..., alias=SmrtLinkDatabasesAliases.INSTRUMENT_NAME)
 
     @model_validator(mode="before")
     @classmethod
@@ -134,7 +135,7 @@ class BarcodeMetrics(RunMetrics):
         ..., alias=BarcodeMetricsAliases.BARCODED_HIFI_YIELD_PERCENTAGE
     )
     barcoded_hifi_mean_read_length: int = Field(
-        ..., alias=BarcodeMetricsAliases.UNBARCODED_HIFI_MEAN_READ_LENGTH
+        ..., alias=BarcodeMetricsAliases.BARCODED_MEAN_READ_LENGTH
     )
     unbarcoded_hifi_reads: int = Field(..., alias=BarcodeMetricsAliases.UNBARCODED_HIFI_READS)
     unbarcoded_hifi_yield: int = Field(..., alias=BarcodeMetricsAliases.UNBARCODED_HIFI_YIELD)
@@ -151,8 +152,17 @@ class SampleMetrics(RunMetrics):
     hifi_median_read_quality: str = Field(..., alias=SampleMetricsAliases.HIFI_READ_QUALITY)
     hifi_reads: int = Field(..., alias=SampleMetricsAliases.HIFI_READS)
     hifi_yield: int = Field(..., alias=SampleMetricsAliases.HIFI_YIELD)
-    polymerase_read_length: int = Field(..., alias=SampleMetricsAliases.POLYMERASE_READ_LENGTH)
+    polymerase_read_length: int | None = Field(
+        None, alias=SampleMetricsAliases.POLYMERASE_READ_LENGTH
+    )  # Not generated for re-demultiplexed fields
     sample_internal_id: str = Field(..., alias=SampleMetricsAliases.SAMPLE_INTERNAL_ID)
+
+
+class MetadataMetrics(BaseModel):
+    """Model that holds metadata for a specific run."""
+
+    run_name: str
+    unique_id: str
 
 
 class PacBioMetrics(RunMetrics):
@@ -164,4 +174,5 @@ class PacBioMetrics(RunMetrics):
     polymerase: PolymeraseMetrics
     dataset_metrics: SmrtlinkDatasetsMetrics
     barcodes: BarcodeMetrics
+    metadata: MetadataMetrics
     samples: list[SampleMetrics]

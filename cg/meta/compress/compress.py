@@ -9,15 +9,29 @@ from pathlib import Path
 from housekeeper.store.models import File, Version
 
 from cg.apps.crunchy import CrunchyAPI
-from cg.apps.crunchy.files import update_metadata_date
+from cg.apps.crunchy.files import scale_resource_by_reads, update_metadata_date
 from cg.apps.housekeeper.hk import HousekeeperAPI
 from cg.constants import SequencingFileTag
+from cg.constants.compression import (
+    COMPRESSION_MEMORY_INTERCEPT,
+    COMPRESSION_MEMORY_PER_READ,
+    COMPRESSION_MINUTES_PER_READ,
+    COMPRESSION_TIME_INTERCEPT,
+    DECOMPRESSION_MEMORY_INTERCEPT,
+    DECOMPRESSION_MEMORY_PER_READ,
+    DECOMPRESSION_MINUTES_PER_READ,
+    DECOMPRESSION_TIME_INTERCEPT,
+    MEMORY_CEIL,
+    MEMORY_FLOOR,
+    MINUTES_CEIL,
+    MINUTES_FLOOR,
+)
 from cg.constants.constants import PIPELINES_USING_PARTIAL_ANALYSES
 from cg.exc import DecompressionCouldNotStartError
-from cg.meta.backup.backup import SpringBackupAPI
 from cg.meta.compress import files
 from cg.models.compression_data import CaseCompressionData, CompressionData, SampleCompressionData
 from cg.store.models import Case, Sample
+from cg.store.store import Store
 
 LOG = logging.getLogger(__name__)
 
@@ -30,22 +44,53 @@ class CompressAPI:
         hk_api: HousekeeperAPI,
         demux_root: str,
         crunchy_api: CrunchyAPI,
-        backup_api: SpringBackupAPI = None,
+        status_db: Store,
         dry_run: bool = False,
     ):
         self.hk_api: HousekeeperAPI = hk_api
         self.crunchy_api: CrunchyAPI = crunchy_api
-        self.backup_api: SpringBackupAPI = backup_api
         self.demux_root: Path = Path(demux_root)
+        self.status_db: Store = status_db
         self.dry_run: bool = dry_run
+
+    def _get_resources_for_run(
+        self,
+        compression_obj: CompressionData,
+        memory_slope: float,
+        memory_intercept: float,
+        min_gb: int,
+        max_gb: int,
+        time_slope: float,
+        time_intercept: float,
+        min_minutes: int,
+        max_minutes: int,
+    ) -> tuple[int, int]:
+        """Return (memory, minutes) for this run estimated from a linear model resource=base+scalar*reads.
+
+        Scales both from the run's read count when it can be found in
+        illumina_sample_sequencing_metrics; otherwise falls back to CrunchyAPI's configured
+        fallback_memory/fallback_minutes.
+        """
+        reads: int | None = files.get_reads_for_run(compression_obj, self.status_db)
+        if not reads:
+            return self.crunchy_api.fallback_memory, self.crunchy_api.fallback_minutes
+        memory: int = scale_resource_by_reads(
+            reads=reads, slope=memory_slope, intercept=memory_intercept, floor=min_gb, cap=max_gb
+        )
+        minutes: int = scale_resource_by_reads(
+            reads=reads,
+            slope=time_slope,
+            intercept=time_intercept,
+            floor=min_minutes,
+            cap=max_minutes,
+        )
+        return memory, minutes
 
     def set_dry_run(self, dry_run: bool):
         """Update dry run."""
         self.dry_run = dry_run
         if self.crunchy_api.dry_run is False:
             self.crunchy_api.set_dry_run(dry_run)
-        if self.backup_api:
-            self.backup_api.dry_run = self.dry_run
 
     def compress_fastq(self, sample_id: str) -> bool:
         """Compress the FASTQ files for an individual."""
@@ -62,21 +107,34 @@ class CompressAPI:
 
         all_ok: bool = True
         for run_name in sample_fastq:
-            LOG.info(f"Check if compression possible for run {run_name}")
+            LOG.debug(f"Check if compression possible for run {run_name}")
             compression: CompressionData = sample_fastq[run_name]["compression_data"]
             is_compression_possible: bool = self._is_fastq_compression_possible(
                 compression=compression,
                 sample_id=sample_id,
             )
             if not is_compression_possible:
-                LOG.warning(f"FASTQ to SPRING not possible for {sample_id}, run {run_name}")
+                LOG.info(f"FASTQ to SPRING not possible for {sample_id}, run {run_name}")
                 all_ok = False
                 continue
 
             LOG.info(
                 f"Compressing {compression.fastq_first} and {compression.fastq_second} for sample {sample_id} into SPRING format"
             )
-            self.crunchy_api.fastq_to_spring(compression_obj=compression, sample_id=sample_id)
+            memory, minutes = self._get_resources_for_run(
+                compression,
+                memory_slope=COMPRESSION_MEMORY_PER_READ,
+                memory_intercept=COMPRESSION_MEMORY_INTERCEPT,
+                min_gb=MEMORY_FLOOR,
+                max_gb=MEMORY_CEIL,
+                time_slope=COMPRESSION_MINUTES_PER_READ,
+                time_intercept=COMPRESSION_TIME_INTERCEPT,
+                min_minutes=MINUTES_FLOOR,
+                max_minutes=MINUTES_CEIL,
+            )
+            self.crunchy_api.fastq_to_spring(
+                compression_obj=compression, sample_id=sample_id, memory=memory, minutes=minutes
+            )
         return all_ok
 
     def _is_fastq_compression_possible(self, compression: CompressionData, sample_id: str) -> bool:
@@ -96,8 +154,13 @@ class CompressAPI:
     def decompress_case(self, case: Case) -> None:
         """Decompresses all Spring files tied to the case.
         Raises:
-            DecompressionFailedToStartError if no sample could start decompressing."""
-        if not any(self.decompress_spring(sample.internal_id) for sample in case.samples):
+            DecompressionCouldNotStartError if no sample could start decompressing.
+        """
+        success = False
+        for sample in case.samples:
+            if self.decompress_spring(sample.internal_id):
+                success = True
+        if not success:
             raise DecompressionCouldNotStartError(
                 f"No sample could be decompressed for {case.internal_id}"
             )
@@ -108,10 +171,8 @@ class CompressAPI:
         This function will make sure that everything is ready for decompression from SPRING archive
         to FASTQ files.
 
-            - Housekeeper will be updated to include FASTQ files
             - Housekeeper will still have the SPRING and SPRING metadata file
             - The SPRING metadata file will be updated to include date for decompression
-            - PDC archived SPRING files will be retrieved and decrypted before decompression
         """
         version: Version = self.hk_api.get_latest_bundle_version(bundle_name=sample_id)
         if not version:
@@ -119,29 +180,34 @@ class CompressAPI:
 
         compressions: list[CompressionData] = files.get_spring_paths(version_obj=version)
         for compression in compressions:
-            if not compression.is_spring_decompression_possible:
-                LOG.info(f"SPRING to FASTQ decompression not possible for {sample_id}")
-                if compression.is_compression_pending or compression.is_spring_decompression_done:
-                    LOG.info(
-                        f"Spring file {compression.spring_path.as_posix()} is already being decompressed."
-                    )
-                    continue
-                if not self.backup_api.is_to_be_retrieved_and_decrypted(
-                    spring_file_path=compression.spring_path
-                ):
-                    LOG.warning(f"Could not find {compression.spring_path} on disk")
-                    return False
-                LOG.info("The SPRING file will be retrieved from PDC and decrypted")
-                self.backup_api.retrieve_and_decrypt_spring_file(
-                    spring_file_path=Path(compression.spring_path)
-                )
-
             LOG.info(
                 f"Decompressing {compression.spring_path} to FASTQ format for sample {sample_id}"
             )
+            if not compression.is_spring_decompression_possible:
+                if not (
+                    compression.is_compression_pending or compression.is_spring_decompression_done
+                ):
+                    return False
+            else:
+                memory, minutes = self._get_resources_for_run(
+                    compression,
+                    memory_slope=DECOMPRESSION_MEMORY_PER_READ,
+                    memory_intercept=DECOMPRESSION_MEMORY_INTERCEPT,
+                    min_gb=MEMORY_FLOOR,
+                    max_gb=MEMORY_CEIL,
+                    time_slope=DECOMPRESSION_MINUTES_PER_READ,
+                    time_intercept=DECOMPRESSION_TIME_INTERCEPT,
+                    min_minutes=MINUTES_FLOOR,
+                    max_minutes=MINUTES_CEIL,
+                )
+                self.crunchy_api.spring_to_fastq(
+                    compression_obj=compression,
+                    sample_id=sample_id,
+                    memory=memory,
+                    minutes=minutes,
+                )
+                update_metadata_date(spring_metadata_path=compression.spring_metadata_path)
 
-            self.crunchy_api.spring_to_fastq(compression_obj=compression, sample_id=sample_id)
-            update_metadata_date(spring_metadata_path=compression.spring_metadata_path)
         return True
 
     def _is_sample_linked_to_newer_case(self, sample: Sample, days_back: int) -> bool:
@@ -253,7 +319,9 @@ class CompressAPI:
             LOG.warning(f"Could not find any spring paths for {sample.internal_id}")
         for compression in spring_paths:
             if not compression.is_spring_decompression_done:
-                LOG.info(f"SPRING to FASTQ decompression not finished {sample.internal_id}")
+                LOG.info(
+                    f"SPRING to FASTQ decompression has not completed or was never started for {sample.internal_id}"
+                )
                 return False
 
             fastq_first: Path = compression.fastq_first

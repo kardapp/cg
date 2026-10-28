@@ -4,15 +4,18 @@ from datetime import datetime
 
 from cg.constants import SequencingRunDataAvailability
 from cg.constants.constants import CaseActions, SequencingQCStatus
+from cg.constants.lims import LimsStatus
 from cg.constants.sequencing import Sequencers
 from cg.services.illumina.post_processing.utils import get_q30_threshold
 from cg.store.crud.read import ReadHandler
 from cg.store.models import (
     Analysis,
     Case,
+    ExternalSample,
     IlluminaSampleSequencingMetrics,
     IlluminaSequencingRun,
     Order,
+    PacbioSequencingRun,
     Sample,
 )
 
@@ -78,10 +81,10 @@ class UpdateMixin(ReadHandler):
         sample.reads = total_reads_for_sample
         self.commit_to_store()
 
-    def update_sample_reads(self, internal_id: str, reads: int):
+    def update_sample_reads_pacbio(self, internal_id: str, reads: int):
         """Add reads to the current reads for a sample."""
-        sample: Sample = self.get_sample_by_internal_id(internal_id)
-        sample.reads += reads
+        sample: Sample = self.get_sample_by_internal_id_strict(internal_id)
+        sample.reads = reads
         self.commit_to_store()
 
     def update_sample_sequenced_at(self, internal_id: str, date: datetime):
@@ -132,3 +135,27 @@ class UpdateMixin(ReadHandler):
         analysis: Analysis = self.get_analysis_by_entry_id(analysis_id)
         analysis.delivery_report_created_at = delivery_report_date
         self.commit_to_store()
+
+    def update_pacbio_sequencing_run_comment(self, id: int, comment: str):
+        sequencing_run: PacbioSequencingRun = self.get_pacbio_sequencing_run_by_id(id)
+        sequencing_run.comment = comment
+        self.commit_to_store()
+
+    def update_pacbio_sequencing_run_processed(self, id: int, processed: bool):
+        sequencing_run: PacbioSequencingRun = self.get_pacbio_sequencing_run_by_id(id)
+        sequencing_run.processed = processed
+        self.commit_to_store()
+
+    def update_sample_lims_status(self, internal_id: str, lims_status: LimsStatus) -> Sample:
+        sample: Sample = self.get_sample_by_internal_id_strict(internal_id)
+        sample.lims_status = lims_status
+        return sample
+
+    def update_external_sample(
+        self, customer_id: int, sample_name: str, transferred_at: datetime
+    ) -> ExternalSample:
+        external_sample: ExternalSample = self.get_external_sample_strict(
+            customer_id=customer_id, sample_name=sample_name
+        )
+        external_sample.transferred_at = transferred_at
+        return external_sample

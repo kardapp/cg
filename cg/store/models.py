@@ -11,27 +11,32 @@ from sqlalchemy import (
     Column,
     ForeignKey,
     Numeric,
+    SQLColumnExpression,
     String,
     Table,
 )
 from sqlalchemy import Text as SLQText
-from sqlalchemy import UniqueConstraint, orm, types
+from sqlalchemy import UniqueConstraint, orm, select, types
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.orm.attributes import InstrumentedAttribute
 
 from cg.constants import DataDelivery, Priority, SequencingRunDataAvailability, Workflow
 from cg.constants.archiving import PDC_ARCHIVE_LOCATION
 from cg.constants.constants import (
+    BedVersionGenomeVersion,
     CaseActions,
     ControlOptions,
     SequencingQCStatus,
     SexOptions,
     StatusOptions,
 )
-from cg.constants.devices import DeviceType
-from cg.constants.priority import SlurmQos
-from cg.constants.sequencing import SeqLibraryPrepCategory
+from cg.constants.devices import DeviceType, RevioNames
+from cg.constants.lims import LimsStatus
+from cg.constants.priority import PriorityTerms, SlurmQos, TrailblazerPriority
+from cg.constants.sequencing import ReadType, SeqLibraryPrepCategory
 from cg.constants.symbols import EMPTY_STRING
+from cg.meta.workflow.utils.utils import MAP_TO_TRAILBLAZER_PRIORITY
 from cg.models.orders.constants import OrderType
 
 BigInt = Annotated[int, None]
@@ -110,9 +115,9 @@ order_case = Table(
 
 class PriorityMixin:
     @property
-    def priority_human(self) -> str:
+    def priority_human(self) -> PriorityTerms:
         """Humanized priority for sample."""
-        return self.priority.name
+        return PriorityTerms(self.priority.name)
 
     @priority_human.setter
     def priority_human(self, priority: str) -> None:
@@ -134,8 +139,11 @@ class Application(Base):
     id: Mapped[PrimaryKeyInt]
 
     tag: Mapped[UniqueStr]
-    prep_category: Mapped[str] = mapped_column(
+    prep_category: Mapped[SeqLibraryPrepCategory] = mapped_column(
         types.Enum(*(category.value for category in SeqLibraryPrepCategory))
+    )
+    read_type: Mapped[ReadType] = mapped_column(
+        types.Enum(*(read_types.value for read_types in ReadType))
     )
     is_external: Mapped[bool] = mapped_column(default=False)
     description: Mapped[Str256]
@@ -147,6 +155,8 @@ class Application(Base):
     min_sequencing_depth: Mapped[int] = mapped_column(default=0)
     target_reads: Mapped[BigInt | None] = mapped_column(default=0)
     percent_reads_guaranteed: Mapped[int]
+    target_hifi_yield: Mapped[BigInt | None] = mapped_column(default=None)
+    percent_hifi_yield_guaranteed: Mapped[int | None] = mapped_column(default=None)
     sample_amount: Mapped[int | None]
     sample_volume: Mapped[Text | None]
     sample_concentration: Mapped[Text | None]
@@ -174,6 +184,7 @@ class Application(Base):
         "OrderTypeApplication",
         back_populates="application",
     )
+    lims_workflow_id: Mapped[int | None]
 
     @property
     def order_types(self) -> list[OrderType]:
@@ -191,8 +202,19 @@ class Application(Base):
         return self.tag
 
     @property
-    def expected_reads(self):
+    def expected_reads(self) -> float:
         return self.target_reads * self.percent_reads_guaranteed / 100
+
+    @property
+    def expected_hifi_yield(self) -> int | None:
+        if self.target_hifi_yield is not None and self.percent_hifi_yield_guaranteed is not None:
+            return round(self.target_hifi_yield * self.percent_hifi_yield_guaranteed / 100)
+        else:
+            return None
+
+    @property
+    def expected_express_hifi_yield(self) -> int | None:
+        return round(self.target_hifi_yield * 0.5) if self.target_hifi_yield is not None else None
 
     @property
     def analysis_type(self) -> str:
@@ -232,6 +254,19 @@ class ApplicationVersion(Base):
 
     def __str__(self) -> str:
         return f"{self.application.tag} ({self.version})"
+
+    @hybrid_property
+    def application_tag(self):
+        return self.application.tag
+
+    @application_tag.expression
+    @classmethod
+    def application_tag(cls):
+        return (
+            select(Application.tag)
+            .where(Application.id == cls.application_id)
+            .label("application_tag")
+        )
 
     def to_dict(self, application: bool = True):
         """Represent as dictionary"""
@@ -284,6 +319,17 @@ class Analysis(Base):
     trailblazer_id: Mapped[int | None]
     housekeeper_version_id: Mapped[int | None]
     session_id: Mapped[str | None]
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("order.id"))
+    order: Mapped["Order"] = orm.relationship(back_populates="analyses")
+
+    @hybrid_property
+    def case_internal_id(self) -> str:
+        return self.case.internal_id
+
+    @case_internal_id.expression
+    @classmethod
+    def case_internal_id(cls):
+        return select(Case.internal_id).where(Case.id == cls.case_id).label("case_internal_id")
 
     def __str__(self):
         return f"{self.case.internal_id} | {self.completed_at.date()}"
@@ -322,7 +368,12 @@ class BedVersion(Base):
     """Model for bed target captures versions"""
 
     __tablename__ = "bed_version"
-    __table_args__ = (UniqueConstraint("bed_id", "version", name="_app_version_uc"),)
+    __table_args__ = (
+        UniqueConstraint("bed_id", "version", name="_app_version_uc"),
+        UniqueConstraint(
+            "shortname", "version", "genome_version", name="shortname_version_genome_version_uc"
+        ),
+    )
 
     id: Mapped[PrimaryKeyInt]
     shortname: Mapped[Str64]
@@ -330,7 +381,9 @@ class BedVersion(Base):
     filename: Mapped[Str256]
     checksum: Mapped[Str32 | None]
     panel_size: Mapped[int | None]
-    genome_version: Mapped[Str32 | None]
+    genome_version: Mapped[BedVersionGenomeVersion] = mapped_column(
+        types.Enum(*(genome_version.value for genome_version in BedVersionGenomeVersion))
+    )
     designer: Mapped[Str256 | None]
     comment: Mapped[Text | None]
     created_at: Mapped[datetime | None] = mapped_column(default=datetime.now)
@@ -364,6 +417,7 @@ class Customer(Base):
     invoice_address: Mapped[Text]
     invoice_reference: Mapped[Str32]
     is_trusted: Mapped[bool] = mapped_column(default=False)
+    label: Mapped[Str64 | None]
     lab_contact_id: Mapped[int | None] = mapped_column(ForeignKey("user.id"))
     lab_contact: Mapped["User | None"] = orm.relationship(foreign_keys=[lab_contact_id])
     loqus_upload: Mapped[bool] = mapped_column(default=False)
@@ -454,7 +508,6 @@ class Case(Base, PriorityMixin):
     )
     id: Mapped[PrimaryKeyInt]
     internal_id: Mapped[UniqueStr]
-    is_compressible: Mapped[bool] = mapped_column(default=True)
     name: Mapped[Str128]
     ordered_at: Mapped[datetime | None] = mapped_column(default=datetime.now)
     _panels: Mapped[Text | None]
@@ -497,6 +550,17 @@ class Case(Base, PriorityMixin):
     def latest_ticket(self) -> str | None:
         """Returns the last ticket the family was ordered in"""
         return self.tickets.split(sep=",")[-1] if self.tickets else None
+
+    @property
+    def is_to_be_uploaded_to_customer_inbox(self) -> bool:
+        return not DataDelivery(self.data_delivery).excludes_customer_inbox_delivery
+
+    @property
+    def original_order(self) -> "Order | None":
+        if not self.orders:
+            return None
+        else:
+            return min(self.orders, key=lambda order: order.order_date)
 
     @property
     def latest_order(self) -> "Order":
@@ -590,6 +654,7 @@ class CaseSample(Base):
 
     mother_id: Mapped[int | None] = mapped_column(ForeignKey("sample.id"))
     father_id: Mapped[int | None] = mapped_column(ForeignKey("sample.id"))
+    should_deliver_sample: Mapped[bool]
 
     case: Mapped[Case] = orm.relationship(back_populates="links")
     sample: Mapped["Sample"] = orm.relationship(foreign_keys=[sample_id], back_populates="links")
@@ -667,7 +732,10 @@ class Panel(Base):
 
 class Pool(Base):
     __tablename__ = "pool"
-    __table_args__ = (UniqueConstraint("order", "name", name="_order_name_uc"),)
+    __table_args__ = (UniqueConstraint("order_id", "name", name="_order_name_uc"),)
+
+    def __str__(self):
+        return self.name
 
     application_version_id: Mapped[int] = mapped_column(ForeignKey("application_version.id"))
     application_version: Mapped["ApplicationVersion"] = orm.relationship(
@@ -682,15 +750,31 @@ class Pool(Base):
     invoice_id: Mapped[int | None] = mapped_column(ForeignKey("invoice.id"))
     name: Mapped[Str32]
     no_invoice: Mapped[bool | None] = mapped_column(default=False)
-    order: Mapped[Str64]
+    order_id: Mapped[int] = mapped_column(ForeignKey("order.id"))
+    order: Mapped["Order"] = orm.relationship(foreign_keys=[order_id])
     ordered_at: Mapped[datetime]
     received_at: Mapped[datetime | None]
-    ticket: Mapped[Str32 | None]
 
     invoice: Mapped["Invoice | None"] = orm.relationship(back_populates="pools")
+    samples: Mapped[list["Sample"]] = orm.relationship(back_populates="pool")
+
+    @property
+    def order_name(self):
+        return self.order.name
+
+    @property
+    def ticket(self) -> str | None:
+        return str(self.order.ticket_id) if self.order else None
 
     def to_dict(self):
-        return to_dict(model_instance=self)
+        pool_dict = to_dict(model_instance=self)
+        pool_dict["order"] = self.order_name
+        return pool_dict
+
+
+SAMPLE_NAME_PATTERN = r"^[A-Za-z0-9-]*$"
+SAMPLE_NAME_MINIMUM_LENGTH = 2
+SAMPLE_NAME_MAXIMUM_LENGTH = 128
 
 
 class Sample(Base, PriorityMixin):
@@ -716,10 +800,12 @@ class Sample(Base, PriorityMixin):
     internal_id: Mapped[UniqueStr]
     invoice_id: Mapped[int | None] = mapped_column(ForeignKey("invoice.id"))
     is_tumour: Mapped[bool | None] = mapped_column(default=False)
+    lims_status: Mapped[LimsStatus] = mapped_column(
+        types.Enum(*(status.value for status in LimsStatus)), default=LimsStatus.PENDING
+    )
     loqusdb_id: Mapped[Str64 | None]
     name: Mapped[Str128]
     no_invoice: Mapped[bool] = mapped_column(default=False)
-    order: Mapped[Str64 | None]
     ordered_at: Mapped[datetime]
     organism_id: Mapped[int | None] = mapped_column(ForeignKey("organism.id"))
     organism: Mapped["Organism | None"] = orm.relationship(foreign_keys=[organism_id])
@@ -727,9 +813,10 @@ class Sample(Base, PriorityMixin):
     _phenotype_groups: Mapped[str | None] = mapped_column(types.Text)
     _phenotype_terms: Mapped[str | None] = mapped_column(types.Text)
     prepared_at: Mapped[datetime | None]
-
+    pool_id: Mapped[int | None] = mapped_column(ForeignKey("pool.id"))
     priority: Mapped[Priority] = mapped_column(default=Priority.standard)
-    reads: Mapped[BigInt | None] = mapped_column(default=0)
+    reads: Mapped[BigInt] = mapped_column(default=0)
+    skip_compression: Mapped[bool] = mapped_column(default=False, nullable=False)
     last_sequenced_at: Mapped[datetime | None]
     received_at: Mapped[datetime | None]
     reference_genome: Mapped[Str255 | None]
@@ -746,6 +833,7 @@ class Sample(Base, PriorityMixin):
         foreign_keys=[CaseSample.father_id], back_populates="father"
     )
     invoice: Mapped["Invoice | None"] = orm.relationship(back_populates="samples")
+    pool: Mapped[Pool] = orm.relationship(foreign_keys=[pool_id], back_populates="samples")
 
     _sample_run_metrics: Mapped[list["SampleRunMetrics"]] = orm.relationship(
         back_populates="sample", cascade="all, delete"
@@ -760,14 +848,26 @@ class Sample(Base, PriorityMixin):
         return f"{self.internal_id} ({self.name})"
 
     @property
+    def hifi_yield(self) -> int | None:
+        if self._sample_run_metrics and getattr(self._sample_run_metrics[0], "hifi_yield", False):
+            return sum(metric.hifi_yield for metric in self._sample_run_metrics)  # type: ignore
+        else:
+            return None
+
+    @property
     def archive_location(self) -> str:
         """Returns the data_archive_location if the customer linked to the sample."""
         return self.customer.data_archive_location
 
     @property
-    def expected_reads_for_sample(self) -> int:
+    def expected_reads_for_sample(self) -> float | None:
         """Return the expected reads of the sample."""
         return self.application_version.application.expected_reads
+
+    @property
+    def expected_hifi_yield(self) -> int | None:
+        """Return the expected HiFi yield of the sample."""
+        return self.application_version.application.expected_hifi_yield
 
     @property
     def has_reads(self) -> bool:
@@ -800,7 +900,12 @@ class Sample(Base, PriorityMixin):
         self._phenotype_terms = ",".join(phenotype_term_list) if phenotype_term_list else None
 
     @property
-    def prep_category(self) -> str:
+    def application_tag(self) -> str:
+        """Return the application tag of the application related to the sample."""
+        return self.application_version.application.tag
+
+    @property
+    def prep_category(self) -> SeqLibraryPrepCategory:
         """Return the preparation category of the sample."""
         return self.application_version.application.prep_category
 
@@ -826,6 +931,144 @@ class Sample(Base, PriorityMixin):
         """Return the sample run metrics for the sample."""
         return self._sample_run_metrics
 
+    @property
+    def device_type(self) -> DeviceType | None:
+        """Return the device type the sample was sequenced on."""
+        if self._sample_run_metrics:
+            return self._sample_run_metrics[0].type
+        return None
+
+    @property
+    def case_that_delivers(self) -> Case | None:
+        """Returns the case that should deliver this sample."""
+        if case_samples_that_deliver := [link for link in self.links if link.should_deliver_sample]:
+            # we only expect one of these
+            return case_samples_that_deliver[0].case
+        else:
+            return None
+
+    @hybrid_property
+    def priority_of_case_that_delivers(
+        self,
+    ) -> Priority | None:  # pyright: ignore [reportRedeclaration]
+        if case := self.case_that_delivers:
+            return case.priority
+        else:
+            return None
+
+    @priority_of_case_that_delivers.expression
+    @classmethod
+    def priority_of_case_that_delivers(cls) -> SQLColumnExpression[Priority]:
+        return (
+            select(Case.priority)
+            .join(Case.links)
+            .where(
+                CaseSample.sample_id == cls.id,
+                CaseSample.should_deliver_sample.is_(True),
+            )
+            .limit(1)
+            .label("priority_of_case_that_delivers")
+        )
+
+    @property
+    def trailblazer_priority_of_case_that_delivers(self) -> TrailblazerPriority | None:
+        if case := self.case_that_delivers:
+            return MAP_TO_TRAILBLAZER_PRIORITY[case.priority]
+        else:
+            return None
+
+    @hybrid_property
+    def delivering_case_internal_id(self) -> str | None:  # pyright: ignore [reportRedeclaration]
+        if case := self.case_that_delivers:
+            return case.internal_id
+        return None
+
+    # noinspection PyNestedDecorators
+    @delivering_case_internal_id.expression
+    @classmethod
+    def delivering_case_internal_id(cls) -> SQLColumnExpression[str]:
+        return (
+            select(Case.internal_id)
+            .join(Case.links)
+            .where(
+                CaseSample.sample_id == cls.id,
+                CaseSample.should_deliver_sample.is_(True),
+            )
+            .limit(1)
+            .label("delivering_case_internal_id")
+        )
+
+    @hybrid_property
+    def workflow_of_case_that_delivers(  # pyright: ignore [reportRedeclaration]
+        self,
+    ) -> Workflow | None:
+        """Return the workflow of the original case if the case exists."""
+        if case := self.case_that_delivers:
+            return case.data_analysis
+        else:
+            return None
+
+    # noinspection PyNestedDecorators
+    @workflow_of_case_that_delivers.expression
+    @classmethod
+    def workflow_of_case_that_delivers(cls) -> SQLColumnExpression[Workflow]:
+        return (
+            select(Case.data_analysis)
+            .join(Case.links)
+            .where(
+                CaseSample.sample_id == cls.id,
+                CaseSample.should_deliver_sample.is_(True),
+            )
+            .limit(1)
+            .label("workflow_of_case_that_delivers")
+        )
+
+    @hybrid_property
+    def ticket_id_from_original_order(self) -> int | None:  # pyright: ignore [reportRedeclaration]
+        if self.case_that_delivers and self.case_that_delivers.original_order:
+            return self.case_that_delivers.original_order.ticket_id
+        return None
+
+    # noinspection PyNestedDecorators
+    @ticket_id_from_original_order.expression
+    @classmethod
+    def ticket_id_from_original_order(cls) -> SQLColumnExpression[int]:
+        return (
+            select(Order.ticket_id)
+            .join(Order.cases)
+            .join(CaseSample, CaseSample.case_id == Case.id)
+            .where(
+                CaseSample.sample_id == cls.id,
+                CaseSample.should_deliver_sample.is_(True),
+            )
+            .order_by(Order.order_date.asc())
+            .limit(1)
+            .label("ticket_id_from_original_order")
+        )
+
+    @hybrid_property
+    def order(self) -> str | None:
+        if case := self.case_that_delivers:
+            if order := case.original_order:
+                return order.name
+        return None
+
+    @order.expression
+    @classmethod
+    def order(cls) -> SQLColumnExpression[int]:
+        return (
+            select(Order.name)
+            .join(Order.cases)
+            .join(Case.links)
+            .where(
+                CaseSample.sample_id == cls.id,
+                CaseSample.should_deliver_sample.is_(True),
+            )
+            .order_by(Order.order_date.asc())
+            .limit(1)
+            .label("order")
+        )
+
     def to_dict(self, links: bool = False) -> dict:
         """Represent as dictionary"""
         data = to_dict(model_instance=self)
@@ -833,9 +1076,25 @@ class Sample(Base, PriorityMixin):
         data["customer"] = self.customer.to_dict()
         data["application_version"] = self.application_version.to_dict()
         data["application"] = self.application_version.application.to_dict()
+        data["hifi_yield"] = self.hifi_yield
+        data["uses_reads"] = True
+        data["order"] = self.order
+        if self.device_type == DeviceType.PACBIO:
+            data["uses_reads"] = False
         if links:
             data["links"] = [link_obj.to_dict(family=True, parents=True) for link_obj in self.links]
         return data
+
+
+class ExternalSample(Base):
+    __tablename__ = "external_sample"
+    id: Mapped[PrimaryKeyInt]
+    customer_id: Mapped[int] = mapped_column(ForeignKey("customer.id"))
+    sample_name: Mapped[Str128]
+    customer_uploaded_at: Mapped[datetime]
+    transferred_at: Mapped[datetime | None] = mapped_column(default=None)
+
+    customer: Mapped[Customer] = orm.relationship(foreign_keys=[customer_id])
 
 
 class Invoice(Base):
@@ -898,9 +1157,14 @@ class Order(Base):
     cases: Mapped[list[Case]] = orm.relationship(secondary=order_case, back_populates="orders")
     customer_id: Mapped[int] = mapped_column(ForeignKey("customer.id"))
     customer: Mapped[Customer] = orm.relationship(foreign_keys=[customer_id])
+    name: Mapped[str]
     order_date: Mapped[datetime] = mapped_column(default=datetime.now)
     ticket_id: Mapped[int] = mapped_column(unique=True, index=True)
     is_open: Mapped[bool] = mapped_column(default=True)
+    analyses: Mapped[list[Analysis]] = orm.relationship(
+        back_populates="order", order_by="Analysis.created_at"
+    )
+    pools: Mapped[list[Pool]] = orm.relationship(back_populates="order", order_by="Pool.ordered_at")
 
     @property
     def workflow(self) -> Workflow:
@@ -948,7 +1212,7 @@ class IlluminaFlowCell(RunDevice):
         ForeignKey("run_device.id", ondelete="CASCADE"), primary_key=True
     )
     model: Mapped[str | None] = mapped_column(
-        types.Enum("10B", "25B", "1.5B", "S1", "S2", "S4", "SP")
+        types.Enum("5B", "10B", "25B", "1.5B", "S1", "S2", "S4", "SP")
     )
 
     __mapper_args__ = {"polymorphic_identity": DeviceType.ILLUMINA}
@@ -1023,48 +1287,62 @@ class IlluminaSequencingRun(InstrumentRun):
         return data
 
 
-class PacbioSequencingRun(InstrumentRun):
-    __tablename__ = "pacbio_sequencing_run"
+class PacbioSMRTCellMetrics(InstrumentRun):
+    __tablename__ = "pacbio_smrt_cell_metrics"
 
     id: Mapped[int] = mapped_column(
         ForeignKey("instrument_run.id", ondelete="CASCADE"), primary_key=True
     )
-    well: Mapped[Str32]
-    plate: Mapped[int]
-    run_name: Mapped[Str32]
-    movie_name: Mapped[Str32]
-    started_at: Mapped[datetime]
+    barcoded_hifi_mean_read_length: Mapped[BigInt]
+    barcoded_hifi_reads_percentage: Mapped[Num_6_2]
+    barcoded_hifi_reads: Mapped[BigInt]
+    barcoded_hifi_yield_percentage: Mapped[Num_6_2]
+    barcoded_hifi_yield: Mapped[BigInt]
     completed_at: Mapped[datetime]
-    hifi_reads: Mapped[BigInt]
-    hifi_yield: Mapped[BigInt]
+    control_mean_read_concordance: Mapped[Num_6_2]
+    control_mean_read_length: Mapped[BigInt]
+    control_mode_read_concordance: Mapped[Num_6_2]
+    control_reads: Mapped[BigInt]
+    failed_mean_read_length: Mapped[BigInt]
+    failed_reads: Mapped[BigInt]
+    failed_yield: Mapped[BigInt]
     hifi_mean_read_length: Mapped[BigInt]
     hifi_median_read_quality: Mapped[Str32]
-    percent_reads_passing_q30: Mapped[Num_6_2]
+    hifi_reads: Mapped[BigInt]
+    hifi_yield: Mapped[BigInt]
+    movie_name: Mapped[Str32]
     p0_percent: Mapped[Num_6_2]
     p1_percent: Mapped[Num_6_2]
     p2_percent: Mapped[Num_6_2]
-    productive_zmws: Mapped[BigInt]
+    pacbio_sequencing_run_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            "pacbio_sequencing_run.id",
+            ondelete="CASCADE",
+            name="pacbio_smrt_cell_metrics_pacbio_sequencing_run_fk",
+        )
+    )
+    percent_reads_passing_q30: Mapped[Num_6_2]
+    plate: Mapped[int]
+    polymerase_longest_subread_n50: Mapped[BigInt]
+    polymerase_mean_longest_subread: Mapped[BigInt]
     polymerase_mean_read_length: Mapped[BigInt]
     polymerase_read_length_n50: Mapped[BigInt]
-    polymerase_mean_longest_subread: Mapped[BigInt]
-    polymerase_longest_subread_n50: Mapped[BigInt]
-    control_reads: Mapped[BigInt]
-    control_mean_read_length: Mapped[BigInt]
-    control_mean_read_concordance: Mapped[Num_6_2]
-    control_mode_read_concordance: Mapped[Num_6_2]
-    failed_reads: Mapped[BigInt]
-    failed_yield: Mapped[BigInt]
-    failed_mean_read_length: Mapped[BigInt]
-    barcoded_hifi_reads: Mapped[BigInt]
-    barcoded_hifi_reads_percentage: Mapped[Num_6_2]
-    barcoded_hifi_yield: Mapped[BigInt]
-    barcoded_hifi_yield_percentage: Mapped[Num_6_2]
-    barcoded_hifi_mean_read_length: Mapped[BigInt]
+    productive_zmws: Mapped[BigInt]
+    started_at: Mapped[datetime]
+    unbarcoded_hifi_mean_read_length: Mapped[BigInt]
     unbarcoded_hifi_reads: Mapped[BigInt]
     unbarcoded_hifi_yield: Mapped[BigInt]
-    unbarcoded_hifi_mean_read_length: Mapped[BigInt]
+    well: Mapped[Str32]
+
+    sequencing_run: Mapped["PacbioSequencingRun"] = orm.relationship(
+        back_populates="smrt_cell_metrics"
+    )
 
     __mapper_args__ = {"polymorphic_identity": DeviceType.PACBIO}
+
+    @property
+    def run_id(self) -> str:
+        return self.sequencing_run.run_id
 
     def to_dict(self):
         return to_dict(self)
@@ -1119,14 +1397,34 @@ class PacbioSampleSequencingMetrics(SampleRunMetrics):
     hifi_yield: Mapped[BigInt]
     hifi_mean_read_length: Mapped[BigInt]
     hifi_median_read_quality: Mapped[Str32]
-    polymerase_mean_read_length: Mapped[BigInt]
+    polymerase_mean_read_length: Mapped[BigInt | None]
 
     __mapper_args__ = {"polymorphic_identity": DeviceType.PACBIO}
-    instrument_run = orm.relationship(PacbioSequencingRun, back_populates="sample_metrics")
+    instrument_run = orm.relationship(PacbioSMRTCellMetrics, back_populates="sample_metrics")
 
     def to_dict(self) -> dict:
         """Represent as dictionary"""
         return to_dict(self)
+
+
+class PacbioSequencingRun(Base):
+    """PacBio sequencing run, consisting of a set of SMRT-cells sequenced simultaneously."""
+
+    __tablename__ = "pacbio_sequencing_run"
+
+    id: Mapped[PrimaryKeyInt]
+    run_id: Mapped[Str64] = mapped_column(unique=True)
+    run_name: Mapped[Str64]
+    processed: Mapped[bool] = mapped_column(default=False)
+    comment: Mapped[Text] = mapped_column(default="")
+    instrument_name: Mapped[RevioNames] = mapped_column(
+        types.Enum(*(revio_name.value for revio_name in RevioNames))
+    )
+    unique_id: Mapped[Str64] = mapped_column(unique=True)
+
+    smrt_cell_metrics: Mapped[list[PacbioSMRTCellMetrics]] = orm.relationship(
+        back_populates="sequencing_run"
+    )
 
 
 class OrderTypeApplication(Base):

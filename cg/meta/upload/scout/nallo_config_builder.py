@@ -5,17 +5,12 @@ from housekeeper.store.models import Version
 
 from cg.apps.lims import LimsAPI
 from cg.apps.madeline.api import MadelineAPI
+from cg.constants.constants import GenomeBuild
 from cg.constants.housekeeper_tags import HK_DELIVERY_REPORT_TAG
-from cg.constants.scout import (
-    NALLO_CASE_TAGS,
-    NALLO_RANK_MODEL_THRESHOLD,
-    NALLO_RANK_MODEL_VERSION_SNV,
-    NALLO_RANK_MODEL_VERSION_SV,
-    NALLO_SAMPLE_TAGS,
-    GenomeBuild,
-    UploadTrack,
-)
+from cg.constants.scout import NALLO_CASE_TAGS, NALLO_SAMPLE_TAGS, UploadTrack
+from cg.constants.sequencing import Variants
 from cg.meta.upload.scout.hk_tags import CaseTags, SampleTags
+from cg.meta.upload.scout.rank_model import RankModel, parse_rank_model_file
 from cg.meta.upload.scout.scout_config_builder import ScoutConfigBuilder
 from cg.meta.workflow.nallo import NalloAnalysisAPI
 from cg.models.scout.scout_load_config import NalloLoadConfig, ScoutNalloIndividual
@@ -61,10 +56,28 @@ class NalloConfigBuilder(ScoutConfigBuilder):
         )
         self.include_pedigree_picture(load_config=load_config, analysis=analysis)
         load_config.human_genome_build = GenomeBuild.hg38
-        load_config.rank_score_threshold = NALLO_RANK_MODEL_THRESHOLD
-        load_config.rank_model_version = NALLO_RANK_MODEL_VERSION_SNV
-        load_config.sv_rank_model_version = NALLO_RANK_MODEL_VERSION_SV
+        load_config.rank_score_threshold = self.nallo_analysis_api.rank_model_threshold
+        snv_rank_model: RankModel = self._get_rank_model(
+            hk_version=hk_version, variant_type=Variants.SNV
+        )
+        load_config.rank_model_url = snv_rank_model.path
+        load_config.rank_model_version = snv_rank_model.version
+        sv_rank_model: RankModel = self._get_rank_model(
+            hk_version=hk_version, variant_type=Variants.SV
+        )
+        load_config.sv_rank_model_url = sv_rank_model.path
+        load_config.sv_rank_model_version = sv_rank_model.version
         return load_config
+
+    def _get_rank_model(self, hk_version: Version, variant_type: Variants) -> RankModel:
+        if variant_type == Variants.SNV:
+            tags = {"rank-model-snv"}
+        else:
+            tags = {"rank-model-sv"}
+        file_path: str | None = self.get_file_from_hk(hk_tags=tags, hk_version=hk_version)
+        if not file_path:
+            raise FileNotFoundError(f"No {variant_type} rank model file found in Housekeeper.")
+        return parse_rank_model_file(file_path)
 
     def include_case_files(self, load_config: NalloLoadConfig, hk_version: Version = None) -> None:
         """Include case level files for NALLO case."""
@@ -90,6 +103,20 @@ class NalloConfigBuilder(ScoutConfigBuilder):
         """Include sample level files that are optional."""
         LOG.info("Including NALLO specific sample level files")
         sample_id: str = cast(str, config_sample.sample_id)
+        config_sample.chromograph_images.autozygous = self.remove_chromosome_substring(
+            self.get_sample_file(
+                hk_tags=self.sample_tags.chromograph_autozyg,
+                sample_id=sample_id,
+                hk_version=hk_version,
+            )
+        )
+        config_sample.chromograph_images.coverage = self.remove_chromosome_substring(
+            self.get_sample_file(
+                hk_tags=self.sample_tags.chromograph_coverage,
+                sample_id=sample_id,
+                hk_version=hk_version,
+            )
+        )
         config_sample.d4_file = self.get_sample_file(
             hk_tags=cast(set[str], self.sample_tags.d4_file),
             sample_id=sample_id,
@@ -135,3 +162,6 @@ class NalloConfigBuilder(ScoutConfigBuilder):
             )
             else None
         )
+
+    def _get_reviewer_reference_file(self) -> str:
+        return self.nallo_analysis_api.reference

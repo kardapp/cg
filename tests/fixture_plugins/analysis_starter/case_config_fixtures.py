@@ -37,7 +37,7 @@ def get_nextflow_case_config_dict(
                 nextflow_case_path, f"{nextflow_case_id}_params_file.yaml"
             ).as_posix(),
             "pipeline_repository": nextflow_repository,
-            "pre_run_script": "",
+            "pre_run_script": "do something",
             "revision": nextflow_pipeline_revision,
             "work_dir": Path(nextflow_case_path, "work").as_posix(),
         }
@@ -61,18 +61,8 @@ def balsamic_case_config(case_id: str, tmp_path: Path) -> BalsamicCaseConfig:
 
 
 @pytest.fixture
-def nallo_case_config(get_nextflow_case_config_dict: Callable) -> NextflowCaseConfig:
-    return NextflowCaseConfig(**get_nextflow_case_config_dict(workflow=Workflow.NALLO))
-
-
-@pytest.fixture
 def raredisease_case_config(get_nextflow_case_config_dict: Callable) -> NextflowCaseConfig:
     return NextflowCaseConfig(**get_nextflow_case_config_dict(workflow=Workflow.RAREDISEASE))
-
-
-@pytest.fixture
-def rnafusion_case_config(get_nextflow_case_config_dict: Callable) -> NextflowCaseConfig:
-    return NextflowCaseConfig(**get_nextflow_case_config_dict(workflow=Workflow.RNAFUSION))
 
 
 @pytest.fixture

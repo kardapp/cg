@@ -1,14 +1,25 @@
-from cg.constants.constants import ControlOptions
-from cg.store.models import Application, ApplicationVersion, Case, Customer, Sample
+import pytest
+
+from cg.constants.constants import ControlOptions, DataDelivery
+from cg.constants.priority import Priority, PriorityTerms
+from cg.store.models import (
+    Application,
+    ApplicationVersion,
+    Case,
+    CaseSample,
+    Customer,
+    IlluminaSampleSequencingMetrics,
+    PacbioSampleSequencingMetrics,
+    Sample,
+)
 from cg.store.store import Store
-from tests.cli.conftest import application_tag
 from tests.store_helpers import StoreHelpers
 
 
-def test_application_version_has_application(store: Store, helpers: StoreHelpers, application_tag):
+def test_application_version_has_application(store: Store, helpers: StoreHelpers):
     """Test that an Application version has the application that was instantiated to."""
     # GIVEN an application
-    application: Application = helpers.ensure_application(store=store, tag=application_tag)
+    application: Application = helpers.ensure_application(store=store, tag="dummy_tag")
 
     # WHEN initialising an application version with the application
     application_version = ApplicationVersion(application=application)
@@ -17,6 +28,52 @@ def test_application_version_has_application(store: Store, helpers: StoreHelpers
     assert application_version.application
     # THEN the application version's application is the application used for instantiation
     assert application_version.application == application
+
+
+def test_case_original_order_no_orders():
+    """Test that a case without orders returns None for original order."""
+    # GIVEN a case without orders
+    case = Case()
+
+    # WHEN getting the original order
+    original_order = case.original_order
+
+    # THEN the original order should be None
+    assert original_order is None
+
+
+@pytest.mark.parametrize(
+    "data_delivery, is_to_be_uploaded",
+    [
+        (DataDelivery.ANALYSIS_FILES, True),
+        (DataDelivery.ANALYSIS_SCOUT, True),
+        (DataDelivery.BAM, True),
+        (DataDelivery.FASTQ, True),
+        (DataDelivery.FASTQ_SCOUT, True),
+        (DataDelivery.FASTQ_QC, True),
+        (DataDelivery.FASTQ_ANALYSIS, True),
+        (DataDelivery.FASTQ_QC_ANALYSIS, True),
+        (DataDelivery.FASTQ_ANALYSIS_SCOUT, True),
+        (DataDelivery.NIPT_VIEWER, False),
+        (DataDelivery.NO_DELIVERY, False),
+        (DataDelivery.RAW_DATA_ANALYSIS, True),
+        (DataDelivery.RAW_DATA_ANALYSIS_SCOUT, True),
+        (DataDelivery.RAW_DATA_SCOUT, True),
+        (DataDelivery.SCOUT, False),
+        (DataDelivery.STATINA, False),
+    ],
+)
+def test_case_is_to_be_uploaded_to_customer_inbox(
+    data_delivery: DataDelivery, is_to_be_uploaded: bool
+):
+    # GIVEN a case with a data delivery
+    case = Case(data_delivery=data_delivery)
+
+    # WHEN checking if files are to be uploaded to caesar
+    should_be_uploaded: bool = case.is_to_be_uploaded_to_customer_inbox
+
+    # THEN the value should be as expected
+    assert should_be_uploaded == is_to_be_uploaded
 
 
 def test_microbial_sample_to_dict(microbial_store: Store, helpers):
@@ -117,6 +174,63 @@ def test_multiple_collaborations(base_store, customer_id):
     )
 
 
+def test_sample_case_that_delivers():
+    # GIVEN a sample with a relationship that delivers the sample
+    case_that_delivers = Case()
+    case_that_does_not_deliver = Case()
+    sample = Sample(
+        links=[
+            CaseSample(case=case_that_delivers, should_deliver_sample=True),
+            CaseSample(case=case_that_does_not_deliver, should_deliver_sample=False),
+        ]
+    )
+
+    # WHEN getting the case that delivers
+    case = sample.case_that_delivers
+
+    # THEN the result is the expected case
+    assert case == case_that_delivers
+
+
+def test_sample_case_that_delivers_no_links():
+    # GIVEN a sample without relationships
+    sample = Sample(links=[])
+
+    # WHEN getting the case that delivers
+    case = sample.case_that_delivers
+
+    # THEN the property returns None
+    assert case is None
+
+
+def test_sample_case_that_delivers_no_case_that_delivers():
+    # GIVEN a sample with only relationships having should_deliver_sample False
+    case = Case()
+    sample = Sample(
+        links=[
+            CaseSample(case=case, should_deliver_sample=False),
+        ]
+    )
+
+    # WHEN getting the case that delivers
+    case = sample.case_that_delivers
+
+    # THEN the property should return None
+    assert case is None
+
+
+def test_sample_ticket_id_from_original_order_no_order():
+    """Tests that a sample without an original order returns None for ticket id."""
+    # GIVEN a sample without an original order
+    sample = Sample(links=[CaseSample(case=Case())])
+
+    # WHEN getting the ticket id from the original order
+    ticket_id = sample.ticket_id_from_original_order
+
+    # THEN the ticket id should be None
+    assert ticket_id is None
+
+
 def test_case_samples_all_control(analysis_store: Store, case_id: str) -> None:
     """Tests that are_all_samples_control returns True if all samples in a case are controls."""
 
@@ -148,3 +262,233 @@ def test_sample_is_not_external():
     )
     # THEN the sample is not external
     assert not sample.is_external
+
+
+def test_hifi_yield_pacbio_sample():
+    # GIVEN a PacBio sample with pacbio sequencing runs
+    sample = Sample(
+        _sample_run_metrics=[
+            PacbioSampleSequencingMetrics(hifi_yield=10),
+            PacbioSampleSequencingMetrics(hifi_yield=90),
+        ]
+    )
+    # WHEN getting the accumulated HiFi yield
+    hifi_yield: int | None = sample.hifi_yield
+
+    # THEN the value is the sum of all the sample metric yields
+    assert hifi_yield == 100
+
+
+def test_hifi_yield_illumina_sample():
+    # GIVEN a Illumina sample with Illumina sequencing runs
+    sample = Sample(
+        _sample_run_metrics=[
+            IlluminaSampleSequencingMetrics(),
+            IlluminaSampleSequencingMetrics(),
+        ]
+    )
+
+    # WHEN getting the accumulated HiFi yield
+    hifi_yield: int | None = sample.hifi_yield
+
+    # THEN the value should be None
+    assert hifi_yield is None
+
+
+def test_hifi_yield_no_sample_sequencing_metrics():
+    # GIVEN sample without sequencing metrics
+    sample = Sample()
+
+    # WHEN getting the accumulated HiFi yield
+    hifi_yield: int | None = sample.hifi_yield
+
+    # THEN the value should be None
+    assert hifi_yield is None
+
+
+def test_application_expected_hifi_yield():
+    # GIVEN an application with target_hifi_yield and percent_hifi_yield_guaranteed
+    application = Application(
+        target_hifi_yield=200,
+        percent_hifi_yield_guaranteed=75,
+    )
+
+    # WHEN getting the expected HiFi yield
+    expected_hifi_yield: float | None = application.expected_hifi_yield
+
+    # THEN the value should be calculated correctly
+    assert expected_hifi_yield == 150
+
+
+def test_application_expected_hifi_yield_no_target_hifi_yield():
+    # GIVEN an application without target_hifi_yield
+    application = Application(
+        target_hifi_yield=None,
+        percent_hifi_yield_guaranteed=None,
+    )
+
+    # WHEN getting the expected HiFi yield
+    expected_hifi_yield: float | None = application.expected_hifi_yield
+
+    # THEN the value should be None
+    assert expected_hifi_yield is None
+
+
+def test_sample_to_dict_pacbio_success():
+    # GIVEN a PacBio sample with application, customer, sequencing_metrics, priority and a case
+    application = Application(tag="PACBIOTAG")
+    application_version = ApplicationVersion(application=application)
+    customer = Customer(internal_id="cust000")
+    case_sample = CaseSample(case_id=666)
+    metrics = PacbioSampleSequencingMetrics(hifi_yield=13)
+    sample = Sample(
+        application_version=application_version,
+        customer=customer,
+        priority=Priority.standard,
+        _sample_run_metrics=[metrics],
+        links=[case_sample],
+    )
+
+    # WHEN serialising the sample
+    dict_sample = sample.to_dict()
+
+    # THEN the serialised sample has the expected entries
+    assert dict_sample["priority"] == "standard"
+    assert dict_sample["customer"]["internal_id"] == "cust000"
+    assert dict_sample["application"]["tag"] == "PACBIOTAG"
+    assert dict_sample["application_version"]
+    assert dict_sample["hifi_yield"] == 13
+    assert not dict_sample["uses_reads"]
+
+
+def test_sample_to_dict_illumina_success():
+    # GIVEN a Illumina sample with application, customer, sequencing_metrics, priority and a case
+    application = Application(tag="ILLUMINATAG")
+    application_version = ApplicationVersion(application=application)
+    customer = Customer(internal_id="cust000")
+    case_sample = CaseSample(case_id=666)
+    metrics = IlluminaSampleSequencingMetrics()
+    sample = Sample(
+        application_version=application_version,
+        customer=customer,
+        priority=Priority.standard,
+        _sample_run_metrics=[metrics],
+        links=[case_sample],
+        reads=13,
+    )
+
+    # WHEN serialising the sample
+    dict_sample = sample.to_dict()
+
+    # THEN the serialised sample has the expected entries
+    assert dict_sample["priority"] == "standard"
+    assert dict_sample["customer"]["internal_id"] == "cust000"
+    assert dict_sample["application"]["tag"] == "ILLUMINATAG"
+    assert dict_sample["application_version"]
+    assert dict_sample["hifi_yield"] is None
+    assert dict_sample["reads"] == 13
+    assert dict_sample["uses_reads"]
+
+
+@pytest.mark.parametrize(
+    "priority_num, expected_priority_term",
+    [
+        (Priority.research, PriorityTerms.RESEARCH),
+        (Priority.standard, PriorityTerms.STANDARD),
+        (Priority.priority, PriorityTerms.PRIORITY),
+        (Priority.express, PriorityTerms.EXPRESS),
+        (Priority.clinical_trials, PriorityTerms.CLINICAL_TRIALS),
+    ],
+)
+def test_sample_priority_term(priority_num: Priority, expected_priority_term: PriorityTerms):
+    # GIVEN a sample with a priority
+    sample = Sample(priority=priority_num)
+
+    # WHEN getting the priority_term
+    sample_priority_term = sample.priority_human
+
+    # THEN the right priority term is given
+    assert sample_priority_term == expected_priority_term
+
+
+def test_application_expected_hifi_yield_success():
+    # GIVEN an application with target hifi yield and percent hifi yield guaranteed set
+    application = Application(
+        tag="PacbioTag", target_hifi_yield=50, percent_hifi_yield_guaranteed=90
+    )
+
+    # WHEN calculating the expected hifi yield
+    expected_hifi_yield: float | None = application.expected_hifi_yield
+
+    # THEN the expected hifi yield should be the product of percent and target
+    assert expected_hifi_yield == 45
+
+
+def test_application_expected_hifi_yield_zero():
+    # GIVEN an application with target hifi yield and percent hifi yield guaranteed set to 0 but not None (e.g. external application)
+    application = Application(tag="PacbioTag", target_hifi_yield=0, percent_hifi_yield_guaranteed=0)
+
+    # WHEN calculating the expected hifi yield
+    expected_hifi_yield: float | None = application.expected_hifi_yield
+
+    # THEN the expected hifi yield should be the product of the two
+    assert expected_hifi_yield == 0
+
+
+def test_application_expected_hifi_yield_missing_yield():
+    # GIVEN an application without target hifi yield
+    application = Application(
+        tag="PacbioTag", target_hifi_yield=None, percent_hifi_yield_guaranteed=90
+    )
+
+    # WHEN calculating the expected hifi yield
+    expected_hifi_yield: float | None = application.expected_hifi_yield
+
+    # THEN no expected hifi yield should be returned
+    assert expected_hifi_yield is None
+
+
+def test_application_expected_hifi_yield_missing_percent_hifi_yield_guaranteed():
+    # GIVEN an application without percent_hifi_yield_guaranteed
+    application = Application(
+        tag="PacbioTag", target_hifi_yield=50, percent_hifi_yield_guaranteed=None
+    )
+
+    # WHEN calculating the expected hifi yield
+    expected_hifi_yield: float | None = application.expected_hifi_yield
+
+    # THEN no expected hifi yield should be returned
+    assert expected_hifi_yield is None
+
+
+def test_application_expected_express_hifi_yield():
+    # GIVEN an application with target_hifi_yield set
+    application = Application(tag="PacbioTag", target_hifi_yield=50)
+
+    # WHEN calculating the expected express hifi yield
+    expected_express_hifi_yield: float | None = application.expected_express_hifi_yield
+
+    # THEN the expected express hifi yield should be half of the target hifi yield
+    assert expected_express_hifi_yield == 25
+
+
+def test_application_expected_express_hifi_yield_missing_yield():
+    # GIVEN an application with no target_hifi_yield set
+    application = Application(tag="PacbioTag", target_hifi_yield=None)
+
+    # WHEN calculating the expected express hifi yield
+    expected_express_hifi_yield: float | None = application.expected_express_hifi_yield
+
+    # THEN the expected express hifi yield should be None
+    assert expected_express_hifi_yield is None
+
+
+def test_application_expected_express_hifi_yield_zero_yield():
+    # GIVEN an application with target_hifi_yield set to 0
+    application = Application(tag="PacbioTag", target_hifi_yield=0)
+
+    # WHEN calculating the expected express hifi yield
+    expected_express_hifi_yield: float | None = application.expected_express_hifi_yield
+
+    # THEN the expected express hifi yield should be 0
+    assert expected_express_hifi_yield == 0
